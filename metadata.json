@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4K9CMP8CRN4B1Q6GTNVN3FV",
+  "strategy": "manual-commit",
+  "branch": "buyer-agent",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "README.md",
+    "starter-kit/arena_kit/buyer/__init__.py",
+    "starter-kit/arena_kit/buyer/acceptance.py",
+    "starter-kit/arena_kit/buyer/agent.py",
+    "starter-kit/arena_kit/buyer/assess.py",
+    "starter-kit/arena_kit/buyer/bids.py",
+    "starter-kit/arena_kit/buyer/decisions.py",
+    "starter-kit/arena_kit/buyer/dossier.py",
+    "starter-kit/arena_kit/buyer/economics.py",
+    "starter-kit/arena_kit/buyer/guard.py",
+    "starter-kit/arena_kit/buyer/model.py",
+    "starter-kit/arena_kit/buyer/prompts.py",
+    "starter-kit/arena_kit/buyer/records.py",
+    "starter-kit/arena_kit/buyer/replay.py",
+    "starter-kit/arena_kit/buyer/space.py",
+    "starter-kit/arena_kit/buyer/store.py",
+    "starter-kit/arena_kit/buyer/transport.py",
+    "starter-kit/arena_kit/buyer/writer.py",
+    "starter-kit/arena_kit/cli.py",
+    "starter-kit/arena_kit/client.py",
+    "starter-kit/arena_kit/evaluate.py",
+    "starter-kit/arena_kit/persona.py",
+    "starter-kit/arena_kit/play.py",
+    "starter-kit/arena_kit/sim.py",
+    "starter-kit/tests/test_buyer_evidence.py",
+    "starter-kit/tests/test_buyer_llm.py",
+    "starter-kit/tests/test_buyer_policy.py",
+    "starter-kit/tests/test_buyer_transport.py",
+    "starter-kit/tests/test_kit.py",
+    "starter-kit/tests/test_persona.py",
+    "starter-kit/tests/test_sim.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 634,
+    "cache_creation_tokens": 963645,
+    "cache_read_tokens": 62525380,
+    "output_tokens": 294560,
+    "api_call_count": 311
+  }
+}
