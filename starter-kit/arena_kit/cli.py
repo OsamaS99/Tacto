@@ -103,7 +103,9 @@ def main(argv=None):
     e.add_argument("--clock", action="store_true", help="the 60-second rule and a wave's cap, as in the final")
     e.add_argument("--parallel", type=int, default=3, help="cases at once")
     e.add_argument("--data", **data)
-    e.add_argument("--llm", action="store_true", help="buyer: let it call the model (default: rules and templates)")
+    e.add_argument("--llm", action="store_true", help="let the buyer (and a persona) call the model")
+    e.add_argument("--supplier", default="script", choices=["script", "persona"], help="the simulated supplier")
+    e.add_argument("--seed", type=int, default=0, help="persona: its hidden economics and dice")
     z = sub.add_parser("analyze", help="read buyer run logs (runs/...) and name what went wrong")
     z.add_argument("paths", nargs="+", help="events/session files or folders")
     sub.add_parser("me", help="your team: practice quota used and left, best score per case")
@@ -135,7 +137,16 @@ def main(argv=None):
         if unknown := set(names) - set(AGENTS):
             raise SystemExit(f"unknown agents: {sorted(unknown)}")
         factories = {n: agent_factory(n, args.data, args.llm) for n in names}
-        out = evaluate(factories, cases_folder(args.cases), args.repeat, args.clock, max(1, args.parallel))
+        facts, supplier = None, None
+        if args.supplier == "persona":  # its economics come from the data; cited IDs are checked against it
+            from .data import DataPackage
+            from .persona import PersonaSupplier, persona_model
+
+            package = DataPackage(args.data) if args.data else None
+            facts = package.facts if package else None
+            supplier = PersonaSupplier(package, args.seed, persona_model() if args.llm else None)
+        folder = cases_folder(args.cases)
+        out = evaluate(factories, folder, args.repeat, args.clock, max(1, args.parallel), facts, supplier=supplier)
         print(report(out))
         return
     if args.cmd == "analyze":  # offline: the run's files, never the arena

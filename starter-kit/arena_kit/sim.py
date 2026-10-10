@@ -35,6 +35,7 @@ ID_RE = re.compile(r"\b(?:idx|quote|offer|sc|qn|po|cost|fc|news|doc|ctr):[\w.:@#
 LATE = "late: more than 60 s after the supplier's last move, so it counted as a timeout"
 NAMES = {field: label for label, field in LABELS.items()}
 SIGNALS = {"reply_delay_days": 1, "validity_days": 30}
+SCRIPT = "A fixed script: it concedes the same step per term sheet, down to its floor."
 
 
 def _fmt(v):
@@ -110,9 +111,13 @@ class Fail(Exception):
 class Sim:
     """The arena's state and its one scripted supplier. One lock serialises every call."""
 
-    def __init__(self, cases, facts=None, event_code="sim", clock=time.time, no_clock=False):
+    def __init__(self, cases, facts=None, event_code="sim", clock=time.time, no_clock=False, supplier=None):
         self.cases, self.facts, self.code, self.clock = cases, facts or {}, event_code, clock
         self.no_clock = no_clock  # no 60-second rule: to try the API by hand
+        # None: the one script below. Else an object that opens each thread (`open(s, sup, th)` -> text),
+        # answers (`answer(s, th, msg, sheets, claim_results)` -> (status, stated, text, files)) and
+        # prices the best deal for scoring (`best_cost(s)`), e.g. `persona.PersonaSupplier`.
+        self.supplier = supplier
         self.teams, self.sessions, self.replies, self.calls = {}, {}, {}, {}
         self.ids, self.lock = itertools.count(1), threading.Lock()
 
@@ -126,9 +131,9 @@ class Sim:
             "thread_id": f"thread:{s['case']['case_id'][5:]}:{th['key']}",
             "message_id": f"msg:{th['key']}-{th['round']}-{th['n']}",
             "in_reply_to": None,
-            "from": f"sales@{th['key']}",
+            "from": f"{th.get('role', 'sales')}@{th['key']}",
             "subject": f"Re: {s['case']['title']}",
-            "body": f"Simulated supplier. {text}",
+            "body": text if self.supplier else f"Simulated supplier. {text}",
             "refs": [],
             "action": None,
             "term_sheets": sheets,
@@ -160,7 +165,11 @@ class Sim:
         files = ["cost-breakdown.xlsx"] if "breakdown" in msg.get("body", "").lower() else []
         price = round(max(th["opening"] * FLOOR, th["stated"]["unit_price"] - th["opening"] * STEP), 2)
         best = max(sheets, key=lambda t: t["unit_price"]) if sheets else None
-        if best is None:
+        if self.supplier:  # a delegated supplier decides and writes
+            status, stated, text, files = self.supplier.answer(s, th, msg, sheets, results)
+            th["closed"] = "walked_away" if status == "walked_away" else None
+            reply = self._mail(s, th, status, stated, text, files)
+        elif best is None:
             reply = self._mail(s, th, th["status"], th["stated"], "We keep our offer.", files)
         elif best["unit_price"] >= price:
             reply = self._mail(s, th, "agreed", best, "We agree.", [*files, "quote.pdf"])
@@ -177,7 +186,7 @@ class Sim:
                 "round": th["round"],
                 "actor": f"sup:{th['key']}",
                 "move": structured(reply, th["round"]),
-                "reasons": ["A fixed script: it concedes the same step per term sheet, down to its floor."],
+                "reasons": th.get("reasons") or [SCRIPT],
             }  # the practice shape: the move and the supplier's reasons in words
         )
         return reply
@@ -233,7 +242,8 @@ class Sim:
                 "standard": standard,
                 "opening": opening,
             }
-            self._mail(s, th, "open", {"unit_price": opening}, "Our quote is attached.", ["quote.pdf"])
+            text = self.supplier.open(s, sup, th) if self.supplier else "Our quote is attached."
+            self._mail(s, th, "open", {"unit_price": th["opening"]}, text, ["quote.pdf"])
         self.sessions[sid] = s
         return {
             "session_id": sid,
@@ -290,16 +300,20 @@ class Sim:
         c_open = min(total_cost(case, {"unit_price": th["opening"]}, th["standard"]) for th in ths.values())
         # the best this script would ever accept: its floor price, any allowed values of the other terms
         options = [case["term_options"].get(f) or [None] for f in case["negotiable"][1:]]
-        c_best = min(
-            total_cost(
-                case,
-                {
-                    **dict(zip(case["negotiable"][1:], combo, strict=True)),
-                    "unit_price": round(th["opening"] * FLOOR, 2),
-                },
+        c_best = (
+            self.supplier.best_cost(s)
+            if self.supplier
+            else min(
+                total_cost(
+                    case,
+                    {
+                        **dict(zip(case["negotiable"][1:], combo, strict=True)),
+                        "unit_price": round(th["opening"] * FLOOR, 2),
+                    },
+                )
+                for th in ths.values()
+                for combo in itertools.product(*options)
             )
-            for th in ths.values()
-            for combo in itertools.product(*options)
         )
         alt = case["buyer"].get("alternative") or {}
         c_alt = total_cost(case, alt["terms"]) if alt.get("terms", {}).get("unit_price") else None

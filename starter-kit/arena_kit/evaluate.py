@@ -1,9 +1,11 @@
 """`arena eval`: play agents against an in-process arena-sim on the same cases and compare - score,
 completion, timeouts, invalid actions (422), late moves (409 late), decision latency. The
 simulator's supplier is a plain script that reads only the price: this tests validity, timing and
-packaging, not persuasion.
+packaging, not persuasion. `--supplier persona` plays a supplier with hidden economics from the data
+package instead (`persona.py`): reciprocity, claims, final offers and walk-aways.
 
     uv run arena eval --agents naive,buyer --cases eval_cases --repeat 1 [--clock] [--parallel 3]
+    uv run arena eval --agents naive,buyer --cases eval_cases --supplier persona --data ../data [--seed 0] [--llm]
 
 With --clock the 60-second rule is on and each case gets a wave's cap (`cap_s`) as its deadline,
 as in the Live Final; without it nothing is timed, so no deadline is passed either.
@@ -22,13 +24,13 @@ from .play import RemoteTable, play
 WAVE_CAP_S = 480  # a Live Final wave: 8 minutes
 
 
-def serve(cases_dir, facts=None, clock=True):
-    """arena-sim on a free local port in this process: (base_url, Sim)."""
+def serve(cases_dir, facts=None, clock=True, supplier=None):
+    """arena-sim on a free local port in this process: (base_url, Sim). `supplier`: see `Sim`."""
     import uvicorn
 
     from .sim import Sim, create_app, load_cases
 
-    sim = Sim(load_cases(cases_dir), facts or {}, no_clock=not clock)
+    sim = Sim(load_cases(cases_dir), facts or {}, no_clock=not clock, supplier=supplier)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -78,10 +80,10 @@ class Counting(RemoteTable):
             raise
 
 
-def evaluate(factories, cases_dir, repeat=1, clock=True, parallel=3, facts=None, cap_s=WAVE_CAP_S):
+def evaluate(factories, cases_dir, repeat=1, clock=True, parallel=3, facts=None, cap_s=WAVE_CAP_S, supplier=None):
     """{agent: {case: [run, ...]}}, run = {score, deal, completed, timeout, invalid, late, moves,
     mean_ms, p95_ms, error}."""
-    url, sim = serve(cases_dir, facts, clock)
+    url, sim = serve(cases_dir, facts, clock, supplier)
     client = ArenaClient(url, ArenaClient(url).register(f"eval-{time.time_ns()}", "sim")["api_key"])
     case_ids = sorted(sim.cases)
     jobs = [(name, cid) for name in factories for cid in case_ids for _ in range(repeat)]
