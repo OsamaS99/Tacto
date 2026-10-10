@@ -153,14 +153,15 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         a = assess(t, getattr(t, "label", None))
         c_now = c_of(ev, t)
         takeable = feasible(cs, ev, t) and dominates(ev, t, threads)
-        alt = alternative(cs, ev, space, t, threads)
+        alt = None if late else alternative(cs, ev, space, t, threads)  # late: no round to spare
         if t.status == "final_offer":
-            if alt:  # its own sheet: taking it pushes nothing
+            p = max(pb.p_walk, a.walk_risk if a.intent == "walk_threat" else 0.0)
+            risk = p * max(0.0, fallback(cs, ev, t) - c_now)  # what a walk would cost us
+            if alt and (1 - p) * (c_now - alt.c) > risk:  # any answer but accept may push it to walk
                 return DecisionProposal("send", t.sid, (alt,), reason="final offer: its own cheaper alternative")
             m = mirror(cs, ev, space, t, keep_stated=True) if t.moves_left > 0 else None
             if takeable:
-                p = max(pb.p_walk, a.walk_risk if a.intent == "walk_threat" else 0.0)
-                if m and pb.mirror_final and (1 - p) * (c_now - m.c) > p * max(0.0, fallback(cs, ev, t) - c_now):
+                if m and pb.mirror_final and (1 - p) * (c_now - m.c) > risk:
                     return DecisionProposal("send", t.sid, (m,), reason="final offer: its price on our open terms")
                 return accept(t, "final offer: best sheet")
             if m and not feasible(cs, ev, t) and m.c_high <= min(cs.c_alt, fallback(cs, ev, t)):
@@ -199,9 +200,15 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
                 return DecisionProposal("send", t.sid, (m,), reason="close: its price on our terms")
             return accept(t, "as good as our next bid" if c_now <= next_c + eps else "time is up")
         demand = partial(space.demand, ref={**ev.standard(sid), **t.standing}, std=t.std)
-        # the dearest price we show never falls between rounds (case P18: 5.54 -> 5.50 drew a final offer)
-        ceiling = max([their_price, *(s["unit_price"] for s in t.my_sheets)])
-        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, ceiling)
+        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, their_price)
+        # never the same terms at a lower price than we showed before: that reads as a step back
+        packages = [p for p in packages if not any(_cut(p.terms, s) for s in t.my_sheets)] or packages
         if packages:
             return DecisionProposal("send", t.sid, tuple(packages), reason=f"bid at C {next_c:,.0f}")
     return closing(cs, ev, "nothing left to bid")
+
+
+def _cut(terms, shown):
+    """`terms` are a sheet we showed before, at a lower price."""
+    same = all(terms[f] == shown.get(f) for f in terms if f != "unit_price")
+    return same and terms["unit_price"] < shown.get("unit_price", 0)
