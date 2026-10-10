@@ -47,11 +47,11 @@ MODES = {
 
 # goal -> beta, k, min_rounds_accept, max_rounds (None: round_limit - 1), p_walk, mirror_final, budget
 GOALS = {
-    "leverage": (0.3, 0.5, 3, 5, 0.25, True, 25.0),
-    "stabilise": (0.8, 0.9, 2, 5, 0.40, False, 25.0),
+    "leverage": (0.3, 0.5, 3, 7, 0.25, True, 25.0),
+    "stabilise": (0.8, 0.9, 2, 7, 0.40, False, 25.0),
     "secure_supply": (1.0, 1.0, 1, 5, 0.50, False, 20.0),
-    "quality_first": (0.5, 0.7, 2, 5, 0.35, True, 25.0),
-    "routine": (0.6, 0.8, 1, 5, 0.30, True, 15.0),
+    "quality_first": (0.5, 0.7, 2, 7, 0.35, True, 25.0),
+    "routine": (0.6, 0.8, 1, 6, 0.30, True, 15.0),
 }
 
 

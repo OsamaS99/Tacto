@@ -245,8 +245,9 @@ def model_from_env():
         chosen_effort = os.environ.get(f"LLM_{role.upper()}_EFFORT") or (
             os.environ.get("LLM_EFFORT", effort) if role != "communication" else effort
         )
-        chain = [RoleProfile(primary, chosen_effort, tier, limit)]
-        if fallback and fallback != primary:
+        role_primary = os.environ.get(f"LLM_{role.upper()}_MODEL", primary)
+        chain = [RoleProfile(role_primary, chosen_effort, tier, limit)]
+        if fallback and fallback != role_primary:
             chain.append(RoleProfile(fallback, os.environ.get("LLM_FALLBACK_EFFORT", "low"), tier, 2048))
         profiles[role] = chain
         calls = []

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from arena_kit.buyer import bids
+from arena_kit.buyer import acceptance, bids
 from arena_kit.buyer.acceptance import TAU_CLOSE, TAU_LATE, decide, epsilon, feasible, floor_c
 from arena_kit.buyer.assess import assess
 from arena_kit.buyer.economics import EconomicEvaluator, estimate_supplier
@@ -95,6 +95,14 @@ def test_s03_opening_stays_in_the_floor_led_band_on_90_24_dap():
     assert all(e.c <= c_floor + 0.01 for e in p.packages)
 
 
+@pytest.mark.parametrize(
+    ("goal", "want"),
+    [("leverage", 7), ("stabilise", 7), ("secure_supply", 5), ("quality_first", 7), ("routine", 6)],
+)
+def test_goal_round_budgets_allow_package_exploration(goal, want):
+    assert playbook(with_buyer(category_goal=goal)).max_rounds == want
+
+
 def test_complete_fills_the_cheapest_values_and_snaps():
     ev, space = evaluator(), ContractSpace(CASE)
     full = space.complete({"unit_price": 99.999, "payment_days": 50}, STD, lambda t: ev.c("sup:A", t))
@@ -174,6 +182,59 @@ def test_reciprocity_no_concession_without_movement_and_monotone_bids():
         nxt = bids.next_bid(pb, t, assess(t), c_target, c_res, ev.c("sup:A", {"unit_price": price}), tau=0.2)
         assert nxt >= last
         last = nxt
+
+
+def test_holding_supplier_gets_no_exact_repeat_when_a_new_package_exists():
+    ev = evaluator()
+    old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    new = {**old, "unit_price": 101.0}
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
+    t.my_sheets = [old]
+    packages = [ev.evaluate(CandidatePackage("sup:A", terms, "terms")) for terms in (old, new)]
+    assert [p.terms for p in acceptance.responsive_packages(packages, t, ev, assess(t))] == [new]
+
+
+def test_holding_supplier_keeps_a_package_with_at_least_the_previous_supplier_value():
+    ev = evaluator()
+    old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    friendly = {"unit_price": 101.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    buyer_only = {"unit_price": 101.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
+    t.my_sheets = [old]
+    packages = [ev.evaluate(CandidatePackage("sup:A", terms, "terms")) for terms in (buyer_only, friendly)]
+    assert acceptance.responsive_packages(packages, t, ev, assess(t))[0].terms == friendly
+
+
+def test_responsive_filter_never_discards_the_only_safe_package():
+    ev = evaluator()
+    only = {"unit_price": 99.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
+    t.my_sheets = [only]
+    package = ev.evaluate(CandidatePackage("sup:A", only, "terms"))
+    assert acceptance.responsive_packages([package], t, ev, assess(t)) == [package]
+
+
+def test_responsive_filter_sends_nothing_when_every_novel_package_loses_supplier_value():
+    ev = evaluator()
+    old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    worse = {"unit_price": 100.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
+    t.my_sheets = [old]
+    package = ev.evaluate(CandidatePackage("sup:A", worse, "terms"))
+    assert acceptance.responsive_packages([package], t, ev, assess(t)) == []
+
+
+def test_responsive_filter_exposes_only_supplier_value_preserving_candidates():
+    ev = evaluator()
+    old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    friendly = {"unit_price": 101.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    worse = [
+        {"unit_price": price, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"} for price in (99.0, 100.0)
+    ]
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
+    t.my_sheets = [old]
+    packages = [ev.evaluate(CandidatePackage("sup:A", terms, "terms")) for terms in (*worse, friendly)]
+    assert acceptance.responsive_packages(packages, t, ev, assess(t)) == [packages[-1]]
 
 
 def test_a_regression_meets_a_hold_and_is_not_accepted_early():

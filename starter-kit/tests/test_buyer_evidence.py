@@ -213,7 +213,7 @@ def test_rival_offers_only_when_cheaper_and_once_per_supplier():
     assert rival_claims(state(CASE, None, {"sup:70210": ("offer:X", 10.0)}), "sup:70210") == []
 
 
-def test_no_price_figure_above_our_bid_and_one_quality_figure_per_message():
+def test_historical_price_context_and_one_quality_figure_per_message():
     # case P18: an order price of 5.84 cited with our bid at 5.49; case P11: scorecard and lot ppm read as one claim
     claims = [
         Claim("po", ("po:1-10",), "Our last order was placed at 5.84 per unit.", "po", 4.0, value=5.84),
@@ -222,9 +222,27 @@ def test_no_price_figure_above_our_bid_and_one_quality_figure_per_message():
     ]
     cs = state({**CASE, "suppliers": ["sup:A"]}, EvidenceDossier("case:E01", claims), {"sup:A": ("offer:A-1", 6.10)})
     assert [c.cid for c in pick_claims(cs, "sup:A")] == ["po", "qn:A"]  # one quality figure, not both
-    assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.49)] == ["qn:A"]
+    assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.49)] == ["po", "qn:A"]
     assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.90)] == ["po", "qn:A"]
     assert strength("quality", "sc") > strength("quality", "qn", 1.0)  # the rolling scorecard first (KNOWN_ISSUES 10)
+
+
+def test_historical_price_context_survives_a_lower_bid_but_should_cost_does_not():
+    claims = [
+        Claim("po", ("po:1",), "Prior PO was 5.84 EUR.", "po", 4.0, value=5.84),
+        Claim("cost", ("cost:1",), "Should-cost is 5.80 EUR.", "cost", 3.0, value=5.80),
+    ]
+    cs = state({**CASE, "suppliers": ["sup:A"]}, EvidenceDossier("T", claims), {"sup:A": ("offer:A", 6.10)})
+    assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.49)] == ["po"]
+
+
+def test_historical_price_above_the_live_ask_is_not_disclosed():
+    claims = [
+        Claim("po", ("po:high",), "Prior PO was 110.00 EUR.", "po", 4.0, value=110.0),
+        Claim("cost", ("cost:low",), "Should-cost is 80.00 EUR.", "cost", 3.0, value=80.0),
+    ]
+    cs = state({**CASE, "suppliers": ["sup:A"]}, EvidenceDossier("T", claims), {"sup:A": ("offer:A", 100.0)})
+    assert [c.cid for c in pick_claims(cs, "sup:A", bid=85.0)] == ["cost"]
 
 
 def test_check_message_drops_promises_we_never_keep():

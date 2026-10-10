@@ -2,6 +2,7 @@ import json
 import string
 import threading
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -93,18 +94,44 @@ def test_writer_rejects_ids_and_public_text_it_did_not_offer(bad):
     assert source == "template" and msg == writer.template(PKT)
 
 
-def test_writer_assembles_the_chosen_subset_verbatim_and_keeps_rationale_private():
-    call, _ = replies(turn(package_ids=("P2",), rationale="Our private budget is seventy thousand."))
+def test_writer_assembles_the_chosen_portfolio_verbatim_and_keeps_rationale_private():
+    call, _ = replies(turn(package_ids=("P1", "P2"), rationale="Our private budget is seventy thousand."))
     msg, source, read = writer.write_turn(Model([("m", call)]), PKT, 10.0)
     assert source == "llm" and "private budget" in read["rationale"]
-    assert msg.term_sheets == (SHEETS[1],) and msg.refs == ("idx:STEEL",)
+    assert msg.term_sheets == SHEETS and msg.refs == ("idx:STEEL",)
     assert CLAIM.sentence in msg.body and writer.QUESTIONS["breakdown"] in msg.body
     assert "budget" not in msg.body
 
 
+def test_opening_selection_keeps_all_packages_and_one_claim():
+    pkt = replace(PKT, rev=5, first_contact=True)
+    call, _ = replies(turn(package_ids=("P1",), claim_ids=()))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
+    assert source == "template" and msg.term_sheets == SHEETS and msg.refs == CLAIM.ids
+
+
+def test_later_open_selection_keeps_at_least_two_packages():
+    call, _ = replies(turn(package_ids=("P1",)))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), replace(PKT, rev=3), 10.0)
+    assert source == "template" and msg.term_sheets == SHEETS
+
+
+def test_revision_one_is_not_first_contact_after_a_buyer_message():
+    call, _ = replies(turn(package_ids=("P1", "P2"), claim_ids=()))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), replace(PKT, rev=1, first_contact=False), 10.0)
+    assert source == "llm" and msg.refs == ()
+
+
+def test_final_offer_still_requires_one_package_and_no_claim():
+    pkt = replace(PKT, status="final_offer", acknowledgments=("neutral", "final"))
+    call, _ = replies(turn(package_ids=("P1",), claim_ids=(), question=None, acknowledgment="final"))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
+    assert source == "llm" and msg.term_sheets == (SHEETS[0],) and msg.refs == ()
+
+
 def test_invalid_selection_advances_to_fallback_not_a_second_primary_call():
     bad, calls = replies(turn(package_ids=("P9",)))
-    good, _ = replies(turn(claim_ids=()))
+    good, _ = replies(turn(package_ids=("P1", "P2"), claim_ids=()))
     msg, source, _ = writer.write_turn(Model([("bad", bad), ("good", good)]), PKT, 20.0)
     assert source == "llm" and msg.refs == () and len(calls) == 1
 
@@ -219,6 +246,19 @@ def test_prep_returns_a_bounded_brief_or_defaults():
     invented = {**good, "facts": [{"kind": "fact", "source_ids": ["cost:invented"], "text": "Cheap."}]}
     call, _ = replies(json.dumps(invented))
     assert not writer.prep(Model([("m", call)]), case, dossier).facts
+
+
+def test_prep_cannot_hide_verified_claims():
+    case = {
+        "case_id": "T",
+        "type": "renewal",
+        "buyer": {"category_goal": "leverage"},
+        "negotiable": ["unit_price", "payment_days"],
+    }
+    dossier = EvidenceDossier("T", [CLAIM], text="verified")
+    answer = {**PREP.example, "permitted_disclosures": []}
+    call, _ = replies(json.dumps(answer))
+    assert writer.prep(Model([("m", call)]), case, dossier).permitted_disclosures == (CLAIM.cid,)
 
 
 def test_replay_summarises_without_a_model(tmp_path):

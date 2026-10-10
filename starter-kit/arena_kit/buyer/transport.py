@@ -6,7 +6,6 @@ left pending when the answer was lost (5xx, a dropped connection) until same-ID 
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
 import uuid
@@ -39,11 +38,7 @@ class DurableTable(RemoteTable):
         self.store = store or Store()
         self.note = {}  # what play() and the agent say about the next move, for its event line
         self.sent = {}  # supplier -> our messages the arena holds, as far as we know
-        self.supplier_parallel = (
-            supplier_parallel
-            if supplier_parallel is not None
-            else (3 if os.environ.get("BUYER_CONCURRENT", "0") == "1" else 1)
-        )
+        self.supplier_parallel = supplier_parallel if supplier_parallel is not None else 3
         self._lock, self._notes, self.closing = threading.RLock(), {}, False
         self._recorded_result = False
 

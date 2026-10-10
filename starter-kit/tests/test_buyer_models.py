@@ -34,6 +34,26 @@ def test_role_profiles_keep_priority_high_and_fallback_effort_separate(monkeypat
     assert "key" not in json.dumps(profiles).lower()
 
 
+def test_role_specific_models_override_the_global_primary(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "fast")
+    monkeypatch.setenv("LLM_PREPARATION_MODEL", "strong")
+    monkeypatch.setenv("LLM_INTERPRETATION_MODEL", "strong")
+    monkeypatch.delenv("LLM_COMMUNICATION_MODEL", raising=False)
+    monkeypatch.delenv("LLM_CRITIC_MODEL", raising=False)
+    profiles = model_from_env().configuration()
+    assert profiles["preparation"][0]["model"] == "strong"
+    assert profiles["interpretation"][0]["model"] == "strong"
+    assert profiles["communication"][0]["model"] == "fast"
+    assert profiles["critic"][0]["model"] == "fast"
+
+
+def test_unset_role_models_inherit_the_global_primary(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "global")
+    for role in ("PREPARATION", "INTERPRETATION", "COMMUNICATION", "CRITIC"):
+        monkeypatch.delenv(f"LLM_{role}_MODEL", raising=False)
+    assert all(v[0]["model"] == "global" for v in model_from_env().configuration().values())
+
+
 def test_slow_primary_reserves_fallback_and_late_result_is_isolated(monkeypatch):
     monkeypatch.setattr(model_mod, "FALLBACK_MIN_S", 0.02)
     release = threading.Event()

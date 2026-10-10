@@ -62,12 +62,14 @@ def _fresh(cs, sid, c):
     return not any(i in used for i in c.ids)
 
 
-def favours(c, price):
-    """A price figure still argues for us against `price` (the lower of the supplier's standing price
-    and our dearest sheet: a figure above our own bid argues against it - case P18)."""
-    if c.value is None or not price:
+def favours(c, price, standing_price=None):
+    """A should-cost must directly support our offered price. Other verified price history is
+    context, but it must remain below the supplier's live standing price."""
+    if c.value is None:
         return True
-    return c.value < (0.97 * price if c.kind == "cost" else price)
+    if c.kind == "cost":
+        return not price or c.value < 0.97 * price
+    return not standing_price or c.value <= standing_price
 
 
 def _cap(claims, limit=MAX_CLAIMS):
@@ -92,9 +94,9 @@ def pick_claims(cs, sid, limit=MAX_CLAIMS, bid=None):
     we send with them."""
     menu = list(cs.dossier.claims) if cs.dossier is not None else []
     menu += rival_claims(cs, sid)
-    price = cs.threads[sid].standing.get("unit_price") if sid in cs.threads else None
-    price = min((p for p in (price, bid) if p), default=None)
-    ok = [c for c in menu if _fresh(cs, sid, c) and favours(c, price)]
+    standing = cs.threads[sid].standing.get("unit_price") if sid in cs.threads else None
+    price = bid or standing
+    ok = [c for c in menu if _fresh(cs, sid, c) and favours(c, price, standing)]
     return tuple(_cap(sorted(ok, key=lambda c: -c.strength), limit))
 
 
@@ -155,7 +157,8 @@ def check_message(cs, econ, space, proposal, packet, msg):
     if packet.packages and not sheets:
         raise GuardReject("the approved packages were dropped")
     price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
-    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c) and favours(c, price)])
+    standing = t.standing.get("unit_price")
+    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c) and favours(c, price, standing)])
     rfq = cs.playbook.mode == "rfq" or len(cs.case.get("suppliers", [])) > 1
     body, kept = scrub(msg.body or "", claims, rfq)
     if not body:

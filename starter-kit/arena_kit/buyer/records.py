@@ -212,6 +212,8 @@ class DisclosurePacket:
     questions: tuple[str, ...] = ()
     acknowledgments: tuple[str, ...] = ("neutral",)
     trades: tuple[str, ...] = ()
+    first_contact: bool = False
+    standing_price: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -145,6 +145,18 @@ def keep_alive(cs, ev, threads):
     return {t.sid for t in quoting[: cs.playbook.rfq_keep]} | {t.sid for t in threads if c_of(ev, t) == math.inf}
 
 
+def responsive_packages(packages, t, ev, assessment):
+    """When the supplier holds, change the package and preserve at least the cash value we last
+    offered it. All inputs already passed generation's cost, validity and reservation guards."""
+    if not t.my_sheets or assessment.firmness == 0:
+        return packages
+    novel = [p for p in packages if p.terms not in t.my_sheets]
+    if not novel:
+        return packages
+    previous = max(ev.cash_theirs(t.sid, terms) for terms in t.my_sheets)
+    return [p for p in novel if p.cash_theirs >= previous - 0.005]
+
+
 def decide(cs, ev, space, order, urgent=False, waiting=()):
     """The next move. `order`: live supplier IDs, most urgent first. `urgent`: the wave's cap is near.
     `waiting`: suppliers that have waited long for our answer - a final offer we leave standing
@@ -220,8 +232,9 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
                 return DecisionProposal("send", t.sid, (m,), reason="close: its price on our terms")
             return accept(t, "as good as our next bid" if c_now <= next_c + eps else "time is up")
         demand = partial(space.demand, ref={**ev.standard(sid), **t.standing}, std=t.std)
+        candidates = responsive_packages(bids.generate(ev, space, sid, next_c, their_price, t.standing), t, ev, a)
         packages = bids.select(
-            bids.generate(ev, space, sid, next_c, their_price, t.standing),
+            candidates,
             demand,
             values=a.values,
             reference={**ev.standard(sid), **t.standing},

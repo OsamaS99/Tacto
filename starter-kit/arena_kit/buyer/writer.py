@@ -76,6 +76,8 @@ def disclosure(cs, t, proposal, claims, *, blocked_questions=()):
         questions=tuple(dict.fromkeys(questions)),
         acknowledgments=tuple(acks),
         trades=tuple(trades),
+        first_contact=t.rounds_used == 0,
+        standing_price=t.standing.get("unit_price"),
     )
 
 
@@ -105,7 +107,7 @@ def _render(pkt, sheets, claims, question, acknowledgment="neutral", trade=None,
 def template(pkt: DisclosurePacket) -> PublicMessage:
     sheets = pkt.packages[:1] if pkt.status in ("final_offer", "agreed") else pkt.packages
     price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
-    claims = tuple(c for c in pkt.claims if favours(c, price)) if pkt.status == "open" else ()
+    claims = tuple(c for c in pkt.claims if favours(c, price, pkt.standing_price)) if pkt.status == "open" else ()
     question = pkt.question if pkt.question in pkt.questions else None
     return _render(
         pkt,
@@ -167,8 +169,18 @@ def turn_errors(out, packages, claims, allowed_numbers=None, *, pkt=None):
         return errors
     chosen = [packages[i] for i in out["package_ids"]]
     price = min((s["unit_price"] for s in chosen if s.get("unit_price")), default=None)
-    errors += ["claim no longer buyer-favourable" for i in out["claim_ids"] if not favours(claims[i], price)]
+    errors += [
+        "claim no longer buyer-favourable"
+        for i in out["claim_ids"]
+        if not favours(claims[i], price, pkt.standing_price if pkt else None)
+    ]
     if pkt:
+        if pkt.status == "open":
+            minimum = len(packages) if pkt.first_contact else min(2, len(packages))
+            if len(chosen) < minimum:
+                errors.append("open negotiation requires a diverse package portfolio")
+            if pkt.first_contact and claims and not out["claim_ids"]:
+                errors.append("first contact requires approved evidence")
         if out["question"] and out["question"] not in pkt.questions:
             errors.append("question not offered")
         if out["acknowledgment"] not in pkt.acknowledgments:
@@ -238,12 +250,13 @@ def prep(model, case, dossier, budget_s=PREP_BUDGET_S):
     out = parse_json(raw)
     if out is None:
         return NegotiationBrief(permitted_disclosures=tuple(c.cid for c in claims), lever_priority=default.levers)
+    permitted = tuple(dict.fromkeys((*out["permitted_disclosures"], *(c.cid for c in claims))))
     return NegotiationBrief(
         tuple(out["facts"]),
         tuple(out["interests"]),
         tuple(out["risks"]),
         tuple(out["lever_priority"]),
         tuple(out["questions"]),
-        tuple(out["permitted_disclosures"]),
+        permitted,
         out["playbook"],
     )

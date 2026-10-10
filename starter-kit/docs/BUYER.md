@@ -13,7 +13,14 @@ The buyer uses one case coordinator, deterministic contract economics, three onl
 | Communication selector | gpt-6.1-sol | low | Approved package, claim, question, acknowledgment and trade IDs; private rationale |
 | Offline critic | gpt-6.1-sol | high | General replay findings and synthetic counterexamples |
 
-The fallback is gpt-6-luna with low effort. Supported OpenAI Chat Completions requests use Priority processing on the official endpoint. The actual returned tier is logged, including downgrades. Priority improves speed but cannot guarantee completion inside the Arena deadline. [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode), [reasoning](https://developers.openai.com/api/docs/guides/reasoning).
+The fallback is gpt-6-luna with low effort. `LLM_MODEL` remains the default primary; the optional
+`LLM_PREPARATION_MODEL`, `LLM_INTERPRETATION_MODEL`, `LLM_COMMUNICATION_MODEL` and
+`LLM_CRITIC_MODEL` variables override it per role. A practical latency split is a strong model for
+preparation and interpretation, with a faster model for communication. Supported OpenAI Chat
+Completions requests use Priority processing on the official endpoint. The actual returned tier is
+logged, including downgrades. Priority improves speed but cannot guarantee completion inside the
+Arena deadline. [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode),
+[reasoning](https://developers.openai.com/api/docs/guides/reasoning).
 
 Preparation runs before opening. Direct callers supplying already-open threads receive code-only preparation. Briefs and observations are persisted with an input hash; changed case data invalidates the memo. Interpretations are cached by message identity and content. Optional OpenAI Decisions classification has separate configuration; its confidence is not a supplier acceptance probability.
 
@@ -34,7 +41,9 @@ Queueing, classification, interpretation, selection and fallback share one absol
 
 Actions are recorded atomically before sending and retried under their original move IDs. Absence from a GET does not prove POST failure. A closure barrier stops proposals, settles pending actions and refreshes standing offers. Final-result polling and transient final-case failures have bounded recovery.
 
-Concurrent sends have one pending mutation per supplier and bounded workers. The hosted concurrency gate stays off by default until same-session behavior is verified in the currently paused sandbox. Synthetic tests exercise the concurrent path without Arena quota.
+Concurrent sends have one pending mutation per supplier and up to three bounded supplier workers
+by default. An explicit `supplier_parallel` constructor argument can reduce that number. Synthetic
+tests exercise the concurrent path without Arena quota.
 
 ## Configuration and evaluation
 

@@ -9,7 +9,7 @@ from arena_kit.buyer.agent import BuyerAgent
 from arena_kit.buyer.guard import check_message
 from arena_kit.buyer.model import Model
 from arena_kit.buyer.prompts import INTERPRET, PREP, TURN
-from arena_kit.buyer.records import Claim, DisclosurePacket, PublicMessage, TurnContext
+from arena_kit.buyer.records import Claim, DisclosurePacket, EvidenceDossier, PublicMessage, TurnContext
 from arena_kit.buyer.store import Store
 from arena_kit.buyer.writer import disclosure
 
@@ -88,6 +88,34 @@ def test_preparation_survives_changed_wave_metadata_before_session_open(tmp_path
     resumed = BuyerAgent(model=model, store=store)
     resumed.prepare({**CASE, "seconds_left": 200, "open": True, "wave": 2}, allow_model=False)
     assert len(calls) == 1 and resumed.brief == first.brief and resumed.brief_hash == first.brief_hash
+
+
+def test_cached_brief_is_normalized_with_every_verified_claim(monkeypatch, tmp_path):
+    claim = Claim("sc:A", ("sc:A",), "Scorecard sc:A shows 84.6% delivery.", "sc")
+    dossier = EvidenceDossier(CASE["case_id"], [claim], text=claim.sentence)
+    monkeypatch.setattr("arena_kit.buyer.dossier.build_dossier", lambda package, case: dossier)
+    store = Store(tmp_path)
+    first = BuyerAgent(package=object(), store=store)
+    first.prepare(CASE, allow_model=False)
+    cached = store.case_memo(CASE["case_id"])
+    store.case_memo(
+        CASE["case_id"],
+        brief_hash=cached["brief_hash"],
+        brief={**cached["brief"], "permitted_disclosures": []},
+        model_attempted=False,
+    )
+    resumed = BuyerAgent(package=object(), store=store)
+    resumed.prepare(CASE, allow_model=False)
+    assert resumed.brief.permitted_disclosures == (claim.cid,)
+
+
+def test_disclosure_marks_first_contact_from_buyer_rounds_not_revision():
+    ev = evaluator()
+    t = thread(ev)
+    t.rev = 5
+    cs, _ = state(CASE, [t], ev)
+    proposal = __import__("arena_kit.buyer.records", fromlist=["DecisionProposal"]).DecisionProposal("send", "sup:A")
+    assert disclosure(cs, t, proposal, ()).first_contact
 
 
 def test_emergency_closure_recovers_valid_offer_without_unchecked_walk(monkeypatch):

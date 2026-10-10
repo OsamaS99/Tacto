@@ -27,6 +27,7 @@ from .writer import QUESTIONS, disclosure, template, write_turn
 log = logging.getLogger("arena")
 ENDED = {"walked_away", "no_bid"}
 KEEP_ALIVE_S = 30.0  # an RFQ final offer we leave standing gets a message once its supplier waited this long
+PROMPT_VERSION = "v4"
 
 
 class BuyerAgent:
@@ -59,7 +60,7 @@ class BuyerAgent:
                 {
                     "case": semantic_case,
                     "dossier": asdict(self.dossier) if self.dossier else None,
-                    "prompt_version": "v3",
+                    "prompt_version": PROMPT_VERSION,
                 },
                 sort_keys=True,
                 default=str,
@@ -75,7 +76,7 @@ class BuyerAgent:
                 **{k: tuple(v) if isinstance(v, list) else v for k, v in cached["brief"].items()}
             )
         else:
-            self.brief = prep(self.model if allow_model else None, case, self.dossier)
+            self.brief = self._verified_disclosures(prep(self.model if allow_model else None, case, self.dossier))
             if self.store:
                 self.store.case_memo(
                     self.case_id,
@@ -83,11 +84,17 @@ class BuyerAgent:
                     brief=asdict(self.brief),
                     model_attempted=bool(self.model and allow_model),
                 )
+        self.brief = self._verified_disclosures(self.brief)
         self.playbook = self._playbook(case)
         self.space = ContractSpace(case)
         self.seen, self.since, self.labels = {}, {}, {}
         self.observations, self.questions = {}, {}
         self._restored_session = None
+
+    def _verified_disclosures(self, brief):
+        verified = tuple(c.cid for c in self.dossier.claims) if self.dossier else ()
+        permitted = tuple(dict.fromkeys((*brief.permitted_disclosures, *verified)))
+        return replace(brief, permitted_disclosures=permitted)
 
     def _playbook(self, case):
         """The case's playbook with the brief's adjustments and lever order (negotiable levers only)."""
@@ -108,7 +115,8 @@ class BuyerAgent:
         saved = self.store.memo(self.session_id)
         if saved.get("brief_hash") == self.brief_hash and saved.get("brief"):
             value = saved["brief"]
-            self.brief = NegotiationBrief(**{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()})
+            loaded = NegotiationBrief(**{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()})
+            self.brief = self._verified_disclosures(loaded)
             self.playbook = self._playbook(self.case)
             for key, value in saved.get("observations", {}).items():
                 self.observations[key] = SupplierObservation(
@@ -301,7 +309,7 @@ class BuyerAgent:
             label=t.label,
             observation=asdict(observation) if observation else None,
             model_trace=self.model.trace if self.model else [],
-            prompt_version="v3",
+            prompt_version=PROMPT_VERSION,
             packages=[{"terms": p.terms, "c": round(p.c, 2)} for p in proposal.packages],
         )
         return {"supplier_id": proposal.sid, "message": msg.payload()}

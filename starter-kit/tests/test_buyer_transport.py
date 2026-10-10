@@ -80,6 +80,16 @@ class Final(Wrapped):
         raise ArenaError(409, "final case already played")
 
 
+def test_durable_table_defaults_to_three_supplier_workers(tmp_path):
+    table = DurableTable(object(), store=Store(tmp_path))
+    assert table.supplier_parallel == 3
+
+
+def test_explicit_supplier_parallel_remains_authoritative(tmp_path):
+    table = DurableTable(object(), store=Store(tmp_path), supplier_parallel=1)
+    assert table.supplier_parallel == 1
+
+
 def test_a_move_id_is_kept_across_the_client_retries():
     seen = []
 
