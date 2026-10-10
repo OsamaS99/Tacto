@@ -164,6 +164,18 @@ def responsive_packages(packages, t, ev, assessment):
     return [*friendly, *(p for p in novel if p not in friendly)]
 
 
+def condition_fields(t, space):
+    observation = t.observation
+    if observation is None:
+        return ()
+    out = []
+    for trade in observation.conditional_trades:
+        fields = tuple(f for f in trade.get("fields", ()) if f in space.levers)
+        if fields and fields not in out:
+            out.append(fields)
+    return tuple(sorted(out, key=lambda fields: -len(fields)))
+
+
 def decide(cs, ev, space, order, urgent=False, waiting=()):
     """The next move. `order`: live supplier IDs, most urgent first. `urgent`: the wave's cap is near.
     `waiting`: suppliers that have waited long for our answer - a final offer we leave standing
@@ -243,7 +255,11 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         packages = bids.select(
             candidates,
             demand,
+            ceiling=their_price,
+            n=3 if not t.my_sheets else 2,
             values=a.values,
+            conditions=condition_fields(t, space),
+            supplier_floor=previous_supplier_value(t, ev, a),
             reference={**ev.standard(sid), **t.standing},
         )
         # never the same terms at a lower price than we showed before: that reads as a step back

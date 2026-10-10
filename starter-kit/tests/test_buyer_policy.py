@@ -299,6 +299,94 @@ def test_generated_packages_cost_the_target_and_keep_the_must_haves():
         assert 200_000.0 - 2_100 < e.c <= 200_000.01  # within a cent of price (2 x 1000 units)
 
 
+def test_decide_passes_grounded_conditions_supplier_floor_cap_and_live_ceiling(monkeypatch):
+    ev = evaluator()
+    standing = {"unit_price": 108.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,), standing=standing)
+    t.my_sheets = [{"unit_price": 95.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}]
+    t.observation = SupplierObservation(
+        "m",
+        "f",
+        firmness=2,
+        values=("payment_days", "contract_months"),
+        conditional_trades=(
+            {"fields": ["unit_price", "payment_days", "contract_months"], "evidence": "Ninety days for 24 months."},
+        ),
+        evidence=("Ninety days for 24 months.",),
+        source="model",
+    )
+    cs, space = state(CASE, [t], ev)
+    captured = {}
+    original = bids.select
+
+    def capture(evaluated, demand=None, ceiling=None, n=3, **kwargs):
+        captured.update(ceiling=ceiling, n=n, **kwargs)
+        return original(evaluated, demand, ceiling, n, **kwargs)
+
+    monkeypatch.setattr(bids, "select", capture)
+    proposal = decide(cs, ev, space, [t.sid])
+    assert proposal.kind == "send"
+    assert captured["ceiling"] == 108.0 and captured["n"] == 2
+    assert captured["conditions"] == (("payment_days", "contract_months"),)
+    assert captured["supplier_floor"] == pytest.approx(ev.cash_theirs(t.sid, t.my_sheets[0]))
+
+
+def test_grounded_index_duration_condition_remains_in_later_portfolio():
+    clause = {"series": "S", "material_share": 0.45, "deadband_pct": 0.0, "base_month": "2026-08"}
+    case = {
+        **CASE,
+        "type": "raw_material",
+        "negotiable": ["unit_price", "index_clause", "payment_days", "contract_months"],
+        "fixed_terms": {k: v for k, v in CASE["fixed_terms"].items() if k != "index_clause"},
+        "term_options": {"index_clause": [None, clause], "payment_days": [30, 90], "contract_months": [24, 36]},
+    }
+    ev = evaluator(case, {"payment_days": 30, "contract_months": 24, "incoterm": "DAP"})
+    standing = {"unit_price": 110.0, "index_clause": clause, "payment_days": 90, "contract_months": 24}
+    t = thread(ev, prices=(115.0, 110.0), mine=(190_000.0,), standing=standing)
+    t.my_sheets = [
+        {"unit_price": 95.0, "index_clause": None, "payment_days": 90, "contract_months": 24},
+        {"unit_price": 94.0, "index_clause": clause, "payment_days": 90, "contract_months": 24},
+    ]
+    t.observation = SupplierObservation(
+        "m",
+        "f",
+        firmness=2,
+        values=("index_clause", "contract_months"),
+        conditional_trades=(
+            {
+                "fields": ["unit_price", "contract_months", "index_clause"],
+                "evidence": "24 months provided indexation is included.",
+            },
+        ),
+        evidence=("24 months provided indexation is included.",),
+        source="model",
+    )
+    cs, space = state(case, [t], ev, opening=115.0)
+    proposal = decide(cs, ev, space, [t.sid])
+    assert proposal.kind == "send"
+    assert any(p.terms["index_clause"] == clause and p.terms["contract_months"] == 24 for p in proposal.packages)
+    assert len(proposal.packages) <= 2
+
+
+def test_capacity_portfolio_includes_an_operational_relief_branch_when_valid():
+    case = {
+        **CASE,
+        "type": "capacity",
+        "negotiable": ["unit_price", "lead_time_days", "contract_months"],
+        "fixed_terms": {"payment_days": 60, "volume_per_year": 1000, "incoterm": "DAP", "index_clause": None},
+        "term_options": {"lead_time_days": [42, 56], "contract_months": [24, 36]},
+    }
+    case = with_buyer(case, need_lead_time_days=42, must_haves=[])
+    std = {"lead_time_days": 56, "contract_months": 12, "payment_days": 30, "incoterm": "EXW"}
+    ev, space = evaluator(case, std), ContractSpace(case)
+    t = thread(ev, prices=(110.0,), standing={"unit_price": 110.0, "lead_time_days": 56, "contract_months": 12})
+    t.observation = SupplierObservation("m", "f", values=("lead_time_days", "contract_months"))
+    cs, _ = state(case, [t], ev)
+    proposal = decide(cs, ev, space, [t.sid])
+    assert proposal.kind == "send"
+    assert {42, 56} <= {p.terms["lead_time_days"] for p in proposal.packages}
+
+
 # -- acceptance ------------------------------------------------------------------------------------
 
 
