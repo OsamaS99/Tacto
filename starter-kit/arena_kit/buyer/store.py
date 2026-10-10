@@ -21,7 +21,7 @@ from .records import OutboxMove
 RUNS_ENV = "BUYER_RUNS"
 
 
-def _safe(name):
+def safe(name):
     return re.sub(r"[^\w.@-]", "_", str(name))
 
 
@@ -33,18 +33,18 @@ class Store:
 
     def begin(self, session_id, case_id, group):
         """Where this session's files go: under its set (or case) and case."""
-        self.dirs[session_id] = self.root / _safe(group) / _safe(case_id)
+        self.dirs[session_id] = self.root / safe(group) / safe(case_id)
 
     def _dir(self, session_id):
         if session_id not in self.dirs:  # a restart: find what an earlier run wrote
-            found = next(self.root.glob(f"*/*/{_safe(session_id)}.json"), None)
+            found = next(self.root.glob(f"*/*/{safe(session_id)}.json"), None)
             if found is None:
                 return self.root / "_" / "_"
             self.dirs[session_id] = found.parent
         return self.dirs[session_id]
 
     def _read(self, session_id):
-        path = self._dir(session_id) / f"{_safe(session_id)}.json"
+        path = self._dir(session_id) / f"{safe(session_id)}.json"
         try:
             return json.loads(path.read_text())
         except FileNotFoundError:
@@ -58,7 +58,7 @@ class Store:
             json.dump(data, f, ensure_ascii=False, default=str)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, folder / f"{_safe(session_id)}.json")  # a crash leaves the old or the new, never half
+        os.replace(tmp, folder / f"{safe(session_id)}.json")  # a crash leaves the old or the new, never half
 
     def put(self, move: OutboxMove):
         """Record a move (new, or its new state) - before the POST, so a crash cannot lose its id."""
@@ -84,7 +84,7 @@ class Store:
 
     def case_memo(self, case_id, **values):
         """Persist preparation before a session opens; runtime clocks are never cached here."""
-        path = self.root / "_briefs" / f"{_safe(case_id)}.json"
+        path = self.root / "_briefs" / f"{safe(case_id)}.json"
         with self.lock:
             try:
                 data = json.loads(path.read_text())
@@ -108,5 +108,5 @@ class Store:
         with self.lock:
             folder = self._dir(session_key)
             folder.mkdir(parents=True, exist_ok=True)
-            with open(folder / f"{_safe(session_key)}.events.jsonl", "a") as f:
+            with open(folder / f"{safe(session_key)}.events.jsonl", "a") as f:
                 f.write(line + "\n")

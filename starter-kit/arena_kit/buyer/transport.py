@@ -16,7 +16,7 @@ import httpx
 from ..client import RATE, SERVER, ArenaError, classify
 from ..play import RemoteTable
 from .records import OutboxMove
-from .store import Store, _safe
+from .store import Store, safe
 
 log = logging.getLogger("arena")
 
@@ -49,7 +49,7 @@ class DurableTable(RemoteTable):
 
     def has_saved_session(self, case_id):
         """Final cases have one session: a saved snapshot means preparation is already done."""
-        return any(self.store.root.glob(f"*/{_safe(case_id)}/*.json"))
+        return any(self.store.root.glob(f"*/{safe(case_id)}/*.json"))
 
     def open(self, case_id):
         case, threads = super().open(case_id)
@@ -151,8 +151,10 @@ class DurableTable(RemoteTable):
                 raise ArenaError(503, "resolve the prior move under its original ID before sending another")
             move = OutboxMove(uuid.uuid4().hex, self.session_id, supplier_id, message, _sha(message), time.time())
             self.store.put(move)  # atomically recorded before a worker can send it
-            note = self._notes.pop(supplier_id, dict(self.note))
-            self.note.clear()
+            note = self._notes.pop(supplier_id, None)
+            if note is None:  # not queued: this decision's note is the shared one
+                note = dict(self.note)
+                self.note.clear()
         return self._send_move(move, note)
 
     def _send_move(self, move, note):

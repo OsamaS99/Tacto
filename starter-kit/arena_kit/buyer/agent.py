@@ -83,15 +83,17 @@ class BuyerAgent:
                     brief=asdict(self.brief),
                     model_attempted=bool(self.model and allow_model),
                 )
-        self.playbook = playbook(case, self.brief.playbook)
-        priority = tuple(f for f in self.brief.lever_priority if f in case["negotiable"] and f != "unit_price")
-        self.playbook = replace(
-            self.playbook, levers=tuple(dict.fromkeys((*priority, *self.playbook.levers))), send_margin_s=SEND_MARGIN_S
-        )
+        self.playbook = self._playbook(case)
         self.space = ContractSpace(case)
         self.seen, self.since, self.labels = {}, {}, {}
         self.observations, self.questions = {}, {}
         self._restored_session = None
+
+    def _playbook(self, case):
+        """The case's playbook with the brief's adjustments and lever order (negotiable levers only)."""
+        base = playbook(case, self.brief.playbook)
+        priority = tuple(f for f in self.brief.lever_priority if f in case["negotiable"] and f != "unit_price")
+        return replace(base, levers=tuple(dict.fromkeys((*priority, *base.levers))), send_margin_s=SEND_MARGIN_S)
 
     def set_turn_context(self, context):
         self.turn_context = context
@@ -107,10 +109,7 @@ class BuyerAgent:
         if saved.get("brief_hash") == self.brief_hash and saved.get("brief"):
             value = saved["brief"]
             self.brief = NegotiationBrief(**{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()})
-            self.playbook = replace(playbook(self.case, self.brief.playbook), send_margin_s=SEND_MARGIN_S)
-            self.playbook = replace(
-                self.playbook, levers=tuple(dict.fromkeys((*self.brief.lever_priority, *self.playbook.levers)))
-            )
+            self.playbook = self._playbook(self.case)
             for key, value in saved.get("observations", {}).items():
                 self.observations[key] = SupplierObservation(
                     **{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()}
@@ -252,8 +251,7 @@ class BuyerAgent:
         t = cs.threads[proposal.sid]
         bid = min((p.terms["unit_price"] for p in proposal.packages), default=None)
         claims = pick_claims(cs, proposal.sid, bid=bid) if proposal.packages else ()  # a keep-alive argues nothing
-        if self.brief.permitted_disclosures:
-            claims = tuple(c for c in claims if c.cid in self.brief.permitted_disclosures or c.per_supplier)
+        claims = tuple(c for c in claims if c.cid in self.brief.permitted_disclosures or c.per_supplier)
         observation = t.observation
         blocked = set(self.questions.get(t.sid, ()))
         if observation:
@@ -312,7 +310,7 @@ class BuyerAgent:
             _, fingerprint = identity(t.sid, message)
             if fingerprint not in self.observations:
                 deadline = self.turn_context.decision_deadline if self.turn_context else None
-                budget = self.budget(t.sid) if t.sid not in pending else 0
+                budget = self.budget(t.sid)
                 obs = interpret(
                     t.sid,
                     message,

@@ -14,7 +14,11 @@ MATERIAL = re.compile(
     r"confidential|breakdown|wenn|sofern|freigabe|zeichnung|intern|falsch)\b",
     re.I,
 )
-FINAL = re.compile(r"\b(final|last offer|cannot move|no further|endgültig|letztes angebot|mehr ist nicht drin)\b", re.I)
+FINAL = re.compile(
+    r"\b(final (?:offer|price|quote|proposal|terms)|last offer|cannot move|no further"
+    r"|endgültig|letztes angebot|mehr ist nicht drin)\b",
+    re.I,
+)
 CASH = re.compile(r"\b(cash flow|liquidity|prepayment|faster payment|shorter payment|liquidität|vorkasse)\b", re.I)
 FIELD_WORDS = {
     "payment_days": r"payment|prepayment|zahlung|vorkasse",
@@ -59,7 +63,7 @@ def interpret(sid, message, *, model=None, decisions=None, budget_s=0, deadline=
     )
     refused = (
         ("breakdown",)
-        if re.search(r"do not disclose|confidential|figures stay|keine.*kosten|intern", body, re.I)
+        if re.search(r"do not disclose|confidential|figures stay|keine.*kosten|\\bintern(?:al)?\\b", body, re.I)
         else ()
     )
     answered = (

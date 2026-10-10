@@ -245,3 +245,18 @@ def test_concurrency_is_capped(monkeypatch):
     release.set()
     hold.join()
     assert model_mod.within(lambda: "x", 0.5) == "x"
+
+
+def test_a_keep_alive_question_survives_on_a_final_offer():
+    from dataclasses import replace
+
+    pkt = replace(PKT, packages=(), claims=(), status="final_offer", question="validity", questions=("validity",))
+    assert "until when your offer remains valid" in writer.template(pkt).body
+
+
+@pytest.mark.parametrize("body", ["The final delivery date is 3 May.", "We ship internationally."])
+def test_everyday_words_are_neither_a_final_offer_nor_a_refusal(body):
+    from arena_kit.buyer.interpreter import interpret
+
+    obs = interpret("sup:1", {"body": body})
+    assert obs.firmness == 1 and not obs.refused

@@ -36,7 +36,6 @@ RIVAL = re.compile(
     re.I,
 )
 TOPIC = {"qn": "sc"}  # claim kinds that make the same point
-SMALL = {1.0, 2.0, 3.0}  # counting words ("our 2 packages") leak nothing
 SPELLED_VALUE = re.compile(
     r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|"
     r"sixty|seventy|eighty|ninety|hundred|thousand)(?:[- ]\w+){0,2} "
@@ -63,7 +62,7 @@ def _fresh(cs, sid, c):
     return not any(i in used for i in c.ids)
 
 
-def _favours(c, price):
+def favours(c, price):
     """A price figure still argues for us against `price` (the lower of the supplier's standing price
     and our dearest sheet: a figure above our own bid argues against it - case P18)."""
     if c.value is None or not price:
@@ -95,25 +94,11 @@ def pick_claims(cs, sid, limit=MAX_CLAIMS, bid=None):
     menu += rival_claims(cs, sid)
     price = cs.threads[sid].standing.get("unit_price") if sid in cs.threads else None
     price = min((p for p in (price, bid) if p), default=None)
-    ok = [c for c in menu if _fresh(cs, sid, c) and _favours(c, price)]
+    ok = [c for c in menu if _fresh(cs, sid, c) and favours(c, price)]
     return tuple(_cap(sorted(ok, key=lambda c: -c.strength), limit))
 
 
-def _allowed(packet, claims):
-    """Numbers and dates the prose may use: the packages', the approved claims', the supplier's own."""
-    texts = [c.sentence for c in claims] + [packet.their_last or ""]
-    values = [str(v) for s in packet.packages for v in s.values() if isinstance(v, str)]
-    dates = {d for t in texts + values for d in DATE_RE.findall(t)}
-    nums = set(SMALL) | {int(d[:4]) for d in dates}
-    for raw in [*packet.allowed_numbers, *(n for t in texts for n in NUM_RE.findall(t))]:
-        try:
-            nums.add(round(float(str(raw).replace(",", "")), 2))
-        except ValueError:
-            pass
-    return nums, dates
-
-
-def _clean(s, nums, dates, rfq):
+def _clean(s, rfq):
     """The sentence with stray IDs removed, or None if it says what we must not."""
     s = ID_RE.sub("", s)
     s = re.sub(r"\(\s*[,;\s]*\)", "", s)
@@ -126,7 +111,7 @@ def _clean(s, nums, dates, rfq):
     return s
 
 
-def scrub(body, claims, nums, dates, rfq):
+def scrub(body, claims, rfq):
     """(body, claims kept verbatim): claim sentences protected, every other sentence cleaned."""
     kept, marks = [], {}
     for c in claims:
@@ -142,7 +127,7 @@ def scrub(body, claims, nums, dates, rfq):
             if piece in marks:
                 pieces.append(piece)
             elif piece.strip():
-                good = [s for s in (_clean(p, nums, dates, rfq) for p in SENT_RE.split(piece)) if s and s.strip()]
+                good = [s for s in (_clean(p, rfq) for p in SENT_RE.split(piece)) if s and s.strip()]
                 pieces.append(" ".join(good))
         text = re.sub(r"[ \t]{2,}", " ", " ".join(p for p in pieces if p)).strip()
         if text or not line.strip():
@@ -170,17 +155,16 @@ def check_message(cs, econ, space, proposal, packet, msg):
     if packet.packages and not sheets:
         raise GuardReject("the approved packages were dropped")
     price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
-    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c) and _favours(c, price)])
-    nums, dates = _allowed(packet, claims)
+    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c) and favours(c, price)])
     rfq = cs.playbook.mode == "rfq" or len(cs.case.get("suppliers", [])) > 1
-    body, kept = scrub(msg.body or "", claims, nums, dates, rfq)
+    body, kept = scrub(msg.body or "", claims, rfq)
     if not body:
         raise GuardReject("nothing left to send after scrubbing")
     if len(body) > MAX_BODY:
         raise GuardReject(f"body of {len(body)} characters")
     refs = tuple(dict.fromkeys(i for c in kept for i in c.ids))[:MAX_REFS]
     subject = (msg.subject or "").strip()
-    if not subject or ID_RE.search(subject) or _clean(subject, nums, dates, rfq) != subject:
+    if not subject or ID_RE.search(subject) or _clean(subject, rfq) != subject:
         subject = packet.subject
     return PublicMessage(subject[:MAX_SUBJECT], body, tuple(sheets), refs)
 

@@ -3,7 +3,7 @@
 import json
 import time
 
-from .guard import ID_RE, _favours
+from .guard import ID_RE, favours
 from .model import parse_json
 from .playbook import playbook
 from .prompts import PREP, TURN
@@ -42,15 +42,11 @@ FIELD_NAMES = {
 def disclosure(cs, t, proposal, claims, *, blocked_questions=()):
     sheets = tuple(p.terms for p in proposal.packages)
     observation = t.observation
-    questions = []
-    if t.status == "open":
-        questions = [
-            q
-            for q in (proposal.question, *(cs.brief.questions if getattr(cs, "brief", None) else ()))
-            if q in QUESTIONS and q not in blocked_questions
-        ]
-        if not questions and observation and observation.dependencies and "technical" not in blocked_questions:
-            questions = ["technical"]
+    is_open = t.status == "open"
+    brief_questions = cs.brief.questions if is_open and getattr(cs, "brief", None) else ()
+    questions = [q for q in (proposal.question, *brief_questions) if q in QUESTIONS and q not in blocked_questions]
+    if is_open and not questions and observation and observation.dependencies and "technical" not in blocked_questions:
+        questions = ["technical"]
     acks = ["neutral"]
     if t.status in ("final_offer", "agreed"):
         acks.append("final")
@@ -109,8 +105,8 @@ def _render(pkt, sheets, claims, question, acknowledgment="neutral", trade=None,
 def template(pkt: DisclosurePacket) -> PublicMessage:
     sheets = pkt.packages[:1] if pkt.status in ("final_offer", "agreed") else pkt.packages
     price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
-    claims = tuple(c for c in pkt.claims if _favours(c, price)) if pkt.status == "open" else ()
-    question = pkt.question if pkt.question in pkt.questions and pkt.status == "open" else None
+    claims = tuple(c for c in pkt.claims if favours(c, price)) if pkt.status == "open" else ()
+    question = pkt.question if pkt.question in pkt.questions else None
     return _render(
         pkt,
         sheets,
@@ -171,7 +167,7 @@ def turn_errors(out, packages, claims, allowed_numbers=None, *, pkt=None):
         return errors
     chosen = [packages[i] for i in out["package_ids"]]
     price = min((s["unit_price"] for s in chosen if s.get("unit_price")), default=None)
-    errors += ["claim no longer buyer-favourable" for i in out["claim_ids"] if not _favours(claims[i], price)]
+    errors += ["claim no longer buyer-favourable" for i in out["claim_ids"] if not favours(claims[i], price)]
     if pkt:
         if out["question"] and out["question"] not in pkt.questions:
             errors.append("question not offered")
