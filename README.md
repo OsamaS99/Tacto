@@ -17,6 +17,20 @@ uv run arena eval --agents naive,buyer --cases eval_cases   # local simulator, n
 uv run arena run --set final --agent buyer --parallel 10    # the Live Final (start before 12:00)
 ```
 
+## Practice leaderboard run
+
+After installing dependencies and configuring `starter-kit/.env`, run from the repository root:
+
+```bash
+./scripts/run_practice.sh
+```
+
+This plays one pass over the hosted practice set, three cases at a time, and consumes practice quota.
+It uses the competition model profile (Priority processing, high preparation/interpretation effort,
+low communication/fallback effort) and keeps supplier concurrency disabled. Credentials are loaded
+from `starter-kit/.env`; logs and recovery state stay under the ignored `starter-kit/runs/` directory.
+The launcher locates the repository relative to itself, so it also works from another directory.
+
 ## Environment variables (names only; values never go in the repo)
 
 | Variable | Purpose |
@@ -40,7 +54,7 @@ uv run arena run --set final --agent buyer --parallel 10    # the Live Final (st
 | `BUYER_RUNS` | folder for session state and event logs (default `runs/`) |
 
 Local evaluations use no model unless explicitly enabled; buyer and supplier models have separate flags.
-Hosted practice and sandbox runs remain paused.
+The practice launcher starts sessions only when explicitly run. Sandbox sessions are separate.
 
 Without a model the buyer still plays every case: the deterministic policy and the template
 e-mail never depend on the model.
