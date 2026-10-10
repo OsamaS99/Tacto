@@ -1,0 +1,104 @@
+{
+ "case_id": "case:S04",
+ "set": "practice",
+ "type": "price_increase",
+ "title": "Volute casing HN 50-200: a price increase with a start date",
+ "briefing": "Synthetic eval case. You buy part:310010 from sup:70110, which announces an increase from November. Need: 5200 pc a year for 1 year. Company policy: payment at 45 days or more. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:310010"
+ ],
+ "suppliers": [
+  "sup:70110"
+ ],
+ "negotiable": [
+  "unit_price",
+  "effective_date",
+  "payment_days"
+ ],
+ "fixed_terms": {
+  "lead_time_days": 42,
+  "volume_per_year": 5200,
+  "contract_months": 12,
+  "index_clause": null,
+  "incoterm": "FCA",
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "effective_date": [
+   "2026-11-01",
+   "2027-01-01",
+   "2027-04-01"
+  ],
+  "payment_days": [
+   30,
+   45,
+   60,
+   90
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 3,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 200,
+  "cost_per_defect": 50,
+  "index_paths": {},
+  "must_haves": [
+   {
+    "field": "payment_days",
+    "op": ">=",
+    "value": 45
+   }
+  ],
+  "alternative": {
+   "kind": "none",
+   "ref": null,
+   "terms": {}
+  },
+  "need_per_year": 5200,
+  "horizon_years": 1,
+  "current_unit_price": 128.27,
+  "fallback_unit_price": 147.5,
+  "need_lead_time_days": 42,
+  "category_goal": "leverage",
+  "freight_eur_per_unit": {
+   "EXW": 3.1,
+   "FCA": 2.05,
+   "DAP": 0.0
+  }
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70110@2026Q3",
+  "idx:PPI-C2451@2025-08",
+  "idx:PPI-C2451@2026-08",
+  "idx:LCI-C@2025-08"
+ ],
+ "facts": {
+  "sc:70110@2026Q3": {
+   "colour": "amber",
+   "otd_confirmed_pct": 88.9,
+   "otd_pct": 85.2,
+   "ppm": 712,
+   "quarter": "2026Q3",
+   "supplier": "sup:70110"
+  },
+  "idx:PPI-C2451@2025-08": {
+   "month": "2025-08",
+   "series": "PPI-C2451",
+   "value": 129.0
+  },
+  "idx:PPI-C2451@2026-08": {
+   "month": "2026-08",
+   "series": "PPI-C2451",
+   "value": 131.3
+  },
+  "idx:LCI-C@2025-08": {
+   "month": "2025-08",
+   "series": "LCI-C",
+   "value": 117.0
+  }
+ }
+}

@@ -1,0 +1,123 @@
+{
+ "case_id": "case:S09",
+ "set": "practice",
+ "type": "bundling",
+ "title": "Ball bearings 6306 and 6308: one bundle",
+ "briefing": "Synthetic eval case. You buy part:360020 and part:360021 as one set from sup:70620. Need: 20000 sets a year for 2 years; there is no other source on short notice. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:360020",
+  "part:360021"
+ ],
+ "suppliers": [
+  "sup:70620"
+ ],
+ "negotiable": [
+  "unit_price",
+  "volume_per_year",
+  "contract_months",
+  "payment_days",
+  "incoterm"
+ ],
+ "fixed_terms": {
+  "lead_time_days": 10,
+  "index_clause": null,
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "volume_per_year": [
+   15000,
+   20000,
+   25000
+  ],
+  "contract_months": [
+   12,
+   24,
+   36
+  ],
+  "payment_days": [
+   30,
+   60,
+   90
+  ],
+  "incoterm": [
+   "EXW",
+   "FCA",
+   "DAP"
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 3,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 200,
+  "cost_per_defect": 50,
+  "index_paths": {},
+  "must_haves": [],
+  "alternative": {
+   "kind": "none",
+   "ref": null,
+   "terms": {}
+  },
+  "need_per_year": 20000,
+  "horizon_years": 2,
+  "current_unit_price": 11.6,
+  "fallback_unit_price": 13.4,
+  "need_lead_time_days": 14,
+  "category_goal": "routine",
+  "freight_eur_per_unit": {
+   "EXW": 0.3,
+   "FCA": 0.2,
+   "DAP": 0.0
+  }
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70620@2026Q3",
+  "quote:7300004",
+  "quote:7100061",
+  "idx:PPI-C2815@2025-08",
+  "idx:PPI-C2815@2026-08"
+ ],
+ "facts": {
+  "sc:70620@2026Q3": {
+   "colour": "green",
+   "otd_confirmed_pct": 86.2,
+   "otd_pct": 85.0,
+   "ppm": 302,
+   "quarter": "2026Q3",
+   "supplier": "sup:70620"
+  },
+  "quote:7300004": {
+   "date": "2026-09-06",
+   "incoterm": "DAP",
+   "lead_time_days": 7,
+   "part": "part:360020",
+   "payment_days": 30,
+   "price_unit": 1,
+   "supplier": "sup:70620",
+   "unit_price": 4.39
+  },
+  "quote:7100061": {
+   "date": "2024-01-16",
+   "incoterm": "DAP",
+   "lead_time_days": 6,
+   "part": "part:360021",
+   "payment_days": 30,
+   "price_unit": 1,
+   "supplier": "sup:70620",
+   "unit_price": 7.42
+  },
+  "idx:PPI-C2815@2025-08": {
+   "month": "2025-08",
+   "series": "PPI-C2815",
+   "value": 118.8
+  },
+  "idx:PPI-C2815@2026-08": {
+   "month": "2026-08",
+   "series": "PPI-C2815",
+   "value": 119.8
+  }
+ }
+}

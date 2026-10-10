@@ -1,0 +1,118 @@
+{
+ "case_id": "case:S06",
+ "set": "practice",
+ "type": "raw_material",
+ "title": "Round bar 1.4404: price and index clause",
+ "briefing": "Synthetic eval case. You buy part:370010 from sup:70710. Need: 60000 pc a year for 2 years. The alloy surcharge is expected to fall 5 % over the horizon. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:370010"
+ ],
+ "suppliers": [
+  "sup:70710"
+ ],
+ "negotiable": [
+  "unit_price",
+  "index_clause",
+  "contract_months",
+  "payment_days"
+ ],
+ "fixed_terms": {
+  "lead_time_days": 21,
+  "volume_per_year": 60000,
+  "incoterm": "DAP",
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "index_clause": [
+   null,
+   {
+    "series": "AS-14404",
+    "material_share": 0.6,
+    "deadband_pct": 5.0,
+    "base_month": "2026-08"
+   },
+   {
+    "series": "AS-14404",
+    "material_share": 0.6,
+    "deadband_pct": 0.0,
+    "base_month": "2026-08"
+   }
+  ],
+  "contract_months": [
+   12,
+   24
+  ],
+  "payment_days": [
+   30,
+   60,
+   90
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 3,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 200,
+  "cost_per_defect": 50,
+  "index_paths": {
+   "AS-14404": -0.05
+  },
+  "must_haves": [],
+  "alternative": {
+   "kind": "none",
+   "ref": null,
+   "terms": {}
+  },
+  "need_per_year": 60000,
+  "horizon_years": 2,
+  "current_unit_price": 5.45,
+  "fallback_unit_price": 6.3,
+  "need_lead_time_days": 21,
+  "category_goal": "leverage",
+  "freight_eur_per_unit": {
+   "EXW": 0.12,
+   "FCA": 0.08,
+   "DAP": 0.0
+  }
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70710@2026Q3",
+  "idx:AS-14404@2025-08",
+  "idx:AS-14404@2026-08",
+  "idx:WB-NI@2025-08",
+  "idx:WB-NI@2026-08"
+ ],
+ "facts": {
+  "sc:70710@2026Q3": {
+   "colour": "green",
+   "otd_confirmed_pct": 92.0,
+   "otd_pct": 88.0,
+   "ppm": 75,
+   "quarter": "2026Q3",
+   "supplier": "sup:70710"
+  },
+  "idx:AS-14404@2025-08": {
+   "month": "2025-08",
+   "series": "AS-14404",
+   "value": 2842.108
+  },
+  "idx:AS-14404@2026-08": {
+   "month": "2026-08",
+   "series": "AS-14404",
+   "value": 3021.9769
+  },
+  "idx:WB-NI@2025-08": {
+   "month": "2025-08",
+   "series": "WB-NI",
+   "value": 14949.0
+  },
+  "idx:WB-NI@2026-08": {
+   "month": "2026-08",
+   "series": "WB-NI",
+   "value": 16751.0
+  }
+ }
+}

@@ -1,0 +1,115 @@
+{
+ "case_id": "case:S08",
+ "set": "practice",
+ "type": "quality",
+ "title": "Bearing bracket HN: quality before price",
+ "briefing": "Synthetic eval case. You buy part:310020 from sup:70140, whose defect rate is far above target. Need: 9000 pc a year for 1 year. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:310020"
+ ],
+ "suppliers": [
+  "sup:70140"
+ ],
+ "negotiable": [
+  "unit_price",
+  "ppm_commitment",
+  "chargeback_eur_per_complaint",
+  "payment_days"
+ ],
+ "fixed_terms": {
+  "lead_time_days": 56,
+  "volume_per_year": 9000,
+  "contract_months": 12,
+  "index_clause": null,
+  "incoterm": "FCA",
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "ppm_commitment": [
+   2500,
+   1500,
+   800,
+   400
+  ],
+  "chargeback_eur_per_complaint": [
+   0,
+   50,
+   150,
+   300
+  ],
+  "payment_days": [
+   30,
+   60,
+   90
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 3,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 200,
+  "cost_per_defect": 300,
+  "index_paths": {},
+  "must_haves": [],
+  "alternative": {
+   "kind": "quote",
+   "ref": "quote:7200011",
+   "terms": {
+    "unit_price": 53.56,
+    "payment_days": 30,
+    "lead_time_days": 42,
+    "incoterm": "FCA"
+   }
+  },
+  "need_per_year": 9000,
+  "horizon_years": 1,
+  "current_unit_price": 46.33,
+  "fallback_unit_price": 53.3,
+  "need_lead_time_days": 56,
+  "category_goal": "quality_first",
+  "freight_eur_per_unit": {
+   "EXW": 1.3,
+   "FCA": 0.85,
+   "DAP": 0.0
+  }
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70140@2026Q3",
+  "quote:7200011",
+  "idx:PPI-C2451@2025-08",
+  "idx:PPI-C2451@2026-08"
+ ],
+ "facts": {
+  "sc:70140@2026Q3": {
+   "colour": "red",
+   "otd_confirmed_pct": 73.1,
+   "otd_pct": 63.5,
+   "ppm": 2376,
+   "quarter": "2026Q3",
+   "supplier": "sup:70140"
+  },
+  "quote:7200011": {
+   "date": "2026-09-12",
+   "incoterm": "FCA",
+   "lead_time_days": 42,
+   "part": "part:310020",
+   "payment_days": 30,
+   "price_unit": 1,
+   "supplier": "sup:70190",
+   "unit_price": 53.56
+  },
+  "idx:PPI-C2451@2025-08": {
+   "month": "2025-08",
+   "series": "PPI-C2451",
+   "value": 129.0
+  },
+  "idx:PPI-C2451@2026-08": {
+   "month": "2026-08",
+   "series": "PPI-C2451",
+   "value": 131.3
+  }
+ }
+}

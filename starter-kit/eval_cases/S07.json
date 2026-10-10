@@ -1,0 +1,126 @@
+{
+ "case_id": "case:S07",
+ "set": "practice",
+ "type": "capacity",
+ "title": "Motor IE4 30 kW: securing capacity",
+ "briefing": "Synthetic eval case. You buy part:350013 from sup:70580, a strategic supplier. Need: 900 pc a year for 2 years; the current contract covers 600 a year. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:350013"
+ ],
+ "suppliers": [
+  "sup:70580"
+ ],
+ "negotiable": [
+  "unit_price",
+  "volume_per_year",
+  "contract_months",
+  "lead_time_days",
+  "payment_days"
+ ],
+ "fixed_terms": {
+  "incoterm": "DAP",
+  "index_clause": null,
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "volume_per_year": [
+   600,
+   900,
+   1200
+  ],
+  "contract_months": [
+   12,
+   24
+  ],
+  "lead_time_days": [
+   70,
+   56,
+   42
+  ],
+  "payment_days": [
+   30,
+   60,
+   90
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 6,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 400,
+  "cost_per_defect": 50,
+  "index_paths": {},
+  "must_haves": [],
+  "alternative": {
+   "kind": "current_contract",
+   "ref": null,
+   "terms": {
+    "unit_price": 1690.0,
+    "payment_days": 30,
+    "lead_time_days": 70,
+    "incoterm": "DAP",
+    "volume_per_year": 600,
+    "contract_months": 12
+   }
+  },
+  "need_per_year": 900,
+  "horizon_years": 2,
+  "current_unit_price": 1608.32,
+  "fallback_unit_price": 1850.0,
+  "need_lead_time_days": 56,
+  "category_goal": "stabilise",
+  "freight_eur_per_unit": {
+   "EXW": 18.0,
+   "FCA": 12.0,
+   "DAP": 0.0
+  },
+  "sustainable_margin_pct": 8,
+  "relationship_eur_per_point": 9000
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70580@2026Q3",
+  "quote:7300057",
+  "cost:350013",
+  "idx:PPI-C2711@2025-08",
+  "idx:PPI-C2711@2026-08"
+ ],
+ "facts": {
+  "sc:70580@2026Q3": {
+   "colour": "green",
+   "otd_confirmed_pct": 95.8,
+   "otd_pct": 95.8,
+   "ppm": 0,
+   "quarter": "2026Q3",
+   "supplier": "sup:70580"
+  },
+  "quote:7300057": {
+   "date": "2026-09-09",
+   "incoterm": "DAP",
+   "lead_time_days": 42,
+   "part": "part:350013",
+   "payment_days": 30,
+   "price_unit": 1,
+   "supplier": "sup:70580",
+   "unit_price": 1608.32
+  },
+  "cost:350013": {
+   "confidence_pct": 5,
+   "part": "part:350013",
+   "price_unit": 1,
+   "unit_cost": 1567.9
+  },
+  "idx:PPI-C2711@2025-08": {
+   "month": "2025-08",
+   "series": "PPI-C2711",
+   "value": 120.0
+  },
+  "idx:PPI-C2711@2026-08": {
+   "month": "2026-08",
+   "series": "PPI-C2711",
+   "value": 121.9
+  }
+ }
+}

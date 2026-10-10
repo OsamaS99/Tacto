@@ -1,49 +1,166 @@
 """The guard: every move - the model's, a repaired one, the template - passes here before it is
-sent. Package validity, the claim rules (at most 3 checked IDs, each once per case, a rival's quote
-once per supplier), message limits and privacy."""
+sent. Packages must be exactly the approved ones; claims come only from the code-built menu (at
+most 3 arguments and 3 checked IDs, each ID once per case, a rival's quote or offer once per
+supplier); the prose may not leak a number, an ID or a sentence about our position that code did
+not approve. A sentence that fails is dropped; approved claim sentences go out verbatim."""
 
 import re
 
+from .dossier import rival_claims
 from .records import PublicMessage
 
 ID_RE = re.compile(r"\b(?:idx|quote|offer|sc|qn|po|cost|fc|news|doc|ctr|sup|part|gr|inv|rfq):[\w.:@#/-]*\w")
-MAX_CLAIMS, MAX_SUBJECT, MAX_BODY, MAX_REFS = 3, 300, 8000, 20
+NUM_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?!\w)")
+DATE_RE = re.compile(r"\b\d{4}-\d{2}(?:-\d{2})?\b")
+SENT_RE = re.compile(r"(?<=[.!?])\s+")
+PH_RE = re.compile(r"(\x00[A-Z]\x00)")
+# our position, never said: budget, time pressure, our C, how dependent we are, internal figures
+BLOCK = re.compile(
+    r"\bbudget|\bdeadline|\burgen(?:t|cy|tly)\b|\bmust close\b|\btime pressure\b|\bwalk[- ]?away\b"
+    r"|\bour (?:total )?costs?\b|\btotal cost\b|\bC\s*=|\breservation\b|\btarget price\b|\binternal\b"
+    r"|\bjustified (?:move|increase)\b|\bno (?:other|alternative) (?:supplier|source|option)s?\b"
+    r"|\bonly (?:supplier|source)\b|\bsingle source\b|\bdepend(?:ent|ence)? on you\b"
+    r"|\bpay(?:ing)? (?:you )?(?:on time|promptly|punctually)\b|\b(?:on-time|punctual) payment",
+    re.I,
+)
+# rivals: fair game in an RFQ, a leak of our alternative anywhere else
+RIVAL = re.compile(
+    r"\balternatives? (?:supplier|source|quote|offer|bid|vendor)s?\b|\bother (?:supplier|offer|quote|bid)(?:s|ders?)?\b"
+    r"|\banother (?:supplier|bidder|offer|quote)\b|\bcompetit(?:or|ors|ion|ive (?:offer|quote|bid))\b|\bcompeting\b",
+    re.I,
+)
+SMALL = {1.0, 2.0, 3.0}  # counting words ("our 2 packages") leak nothing
+MAX_CLAIMS, MAX_IDS, MAX_SHEETS, MAX_SUBJECT, MAX_BODY, MAX_REFS = 3, 3, 3, 300, 8000, 20
 
 
 class GuardReject(Exception):
     pass
 
 
-def pick_claims(cs, sid, limit=MAX_CLAIMS):
-    """The strongest unused claims for this supplier, at most `limit` IDs-sets."""
-    if cs.dossier is None:
-        return ()
-    used, to = cs.cited, cs.cited_to.get(sid, set())
-    out = []
-    for c in sorted(cs.dossier.claims, key=lambda c: -c.strength):
-        if c.suppliers and sid not in c.suppliers:
+def _weight(c):
+    """Checked IDs a claim spends: an index pair is one argument."""
+    return 1 if c.kind == "idx" else len(c.ids)
+
+
+def _fresh(cs, sid, c):
+    """Not cited yet (a rival's quote or offer: not to this supplier) and about this supplier."""
+    if c.suppliers and sid not in c.suppliers:
+        return False
+    used = cs.cited_to.get(sid, set()) if c.per_supplier else cs.cited
+    return not any(i in used for i in c.ids)
+
+
+def _favours(c, price):
+    """A price figure still argues for us against the supplier's standing price."""
+    if c.value is None or not price:
+        return True
+    return c.value < (0.97 * price if c.kind == "cost" else price)
+
+
+def _cap(claims, limit=MAX_CLAIMS):
+    """In order: at most `limit` claims, MAX_IDS checked IDs, no ID twice, one claim per kind
+    except index moves."""
+    out, ids, kinds = [], set(), set()
+    for c in claims:
+        if len(out) == limit or sum(map(_weight, out)) + _weight(c) > MAX_IDS:
             continue
-        if any((i in to) if c.per_supplier else (i in used) for i in c.ids):
+        if ids & set(c.ids) or (c.kind in kinds and c.kind != "idx"):
             continue
         out.append(c)
-        if len(out) == limit:
-            break
-    return tuple(out)
+        ids |= set(c.ids)
+        kinds.add(c.kind)
+    return out
+
+
+def pick_claims(cs, sid, limit=MAX_CLAIMS):
+    """The strongest unused claims for this supplier that still favour us."""
+    menu = list(cs.dossier.claims) if cs.dossier is not None else []
+    menu += rival_claims(cs, sid)
+    price = cs.threads[sid].standing.get("unit_price") if sid in cs.threads else None
+    ok = [c for c in menu if _fresh(cs, sid, c) and _favours(c, price)]
+    return tuple(_cap(sorted(ok, key=lambda c: -c.strength), limit))
+
+
+def _allowed(packet, claims):
+    """Numbers and dates the prose may use: the packages', the approved claims', the supplier's own."""
+    texts = [c.sentence for c in claims] + [packet.their_last or ""]
+    values = [str(v) for s in packet.packages for v in s.values() if isinstance(v, str)]
+    dates = {d for t in texts + values for d in DATE_RE.findall(t)}
+    nums = set(SMALL) | {int(d[:4]) for d in dates}
+    for raw in [*packet.allowed_numbers, *(n for t in texts for n in NUM_RE.findall(t))]:
+        try:
+            nums.add(round(float(str(raw).replace(",", "")), 2))
+        except ValueError:
+            pass
+    return nums, dates
+
+
+def _clean(s, nums, dates, rfq):
+    """The sentence with stray IDs removed, or None if it says what we must not."""
+    s = ID_RE.sub("", s)
+    s = re.sub(r"\(\s*[,;\s]*\)", "", s)
+    if BLOCK.search(s) or (not rfq and RIVAL.search(s)):
+        return None
+    if any(d not in dates for d in DATE_RE.findall(s)):
+        return None
+    rest = DATE_RE.sub("", s)
+    if any(round(float(n.replace(",", "") or 0), 2) not in nums for n in NUM_RE.findall(rest)):
+        return None
+    return s
+
+
+def scrub(body, claims, nums, dates, rfq):
+    """(body, claims kept verbatim): claim sentences protected, every other sentence cleaned."""
+    kept, marks = [], {}
+    for c in claims:
+        if c.sentence in body:
+            mark = f"\x00{chr(65 + len(kept))}\x00"
+            body = body.replace(c.sentence, mark, 1).replace(c.sentence, "")
+            kept.append(c)
+            marks[mark] = c.sentence
+    lines = []
+    for line in body.split("\n"):
+        pieces = []
+        for piece in PH_RE.split(line):
+            if piece in marks:
+                pieces.append(piece)
+            elif piece.strip():
+                good = [s for s in (_clean(p, nums, dates, rfq) for p in SENT_RE.split(piece)) if s and s.strip()]
+                pieces.append(" ".join(good))
+        text = re.sub(r"[ \t]{2,}", " ", " ".join(p for p in pieces if p)).strip()
+        if text or not line.strip():
+            lines.append(text)
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    for mark, sentence in marks.items():
+        out = out.replace(mark, sentence)
+    return out, kept
 
 
 def check_message(cs, econ, space, proposal, packet, msg):
     """The message as it may go out, or GuardReject."""
     t = cs.threads[proposal.sid]
-    sheets = list(msg.term_sheets)
-    if len(sheets) > 3:
-        raise GuardReject("more than 3 term sheets")
-    for s in sheets:
+    sheets = []
+    for s in msg.term_sheets:
+        if s not in packet.packages:
+            raise GuardReject(f"term sheet not approved: {s}")
         if errors := space.valid(s, t.std):
             raise GuardReject(f"invalid term sheet: {errors}")
-    approved = {i for c in packet.claims for i in c.ids}
-    if not set(msg.refs) <= approved:
-        raise GuardReject(f"refs not approved: {set(msg.refs) - approved}")
-    body = ID_RE.sub(lambda m: m.group(0) if m.group(0) in approved else "", msg.body)
-    if len(approved) > MAX_CLAIMS * 2 or len(msg.refs) > MAX_REFS:
-        raise GuardReject("too many refs")
-    return PublicMessage(msg.subject[:MAX_SUBJECT], body.strip()[:MAX_BODY], tuple(sheets), tuple(msg.refs))
+        if s not in sheets:
+            sheets.append(s)
+    if len(sheets) > MAX_SHEETS:
+        raise GuardReject("more than 3 term sheets")
+    if packet.packages and not sheets:
+        raise GuardReject("the approved packages were dropped")
+    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c)])
+    nums, dates = _allowed(packet, claims)
+    rfq = cs.playbook.mode == "rfq" or len(cs.case.get("suppliers", [])) > 1
+    body, kept = scrub(msg.body or "", claims, nums, dates, rfq)
+    if not body:
+        raise GuardReject("nothing left to send after scrubbing")
+    if len(body) > MAX_BODY:
+        raise GuardReject(f"body of {len(body)} characters")
+    refs = tuple(dict.fromkeys(i for c in kept for i in c.ids))[:MAX_REFS]
+    subject = (msg.subject or "").strip()
+    if not subject or ID_RE.search(subject) or _clean(subject, nums, dates, rfq) != subject:
+        subject = packet.subject
+    return PublicMessage(subject[:MAX_SUBJECT], body, tuple(sheets), refs)

@@ -38,6 +38,9 @@ SIGNALS = {"reply_delay_days": 1, "validity_days": 30}
 
 
 def _fmt(v):
+    if isinstance(v, dict):  # an index clause, as the arena's quotes print it (`docs.CLAUSE`)
+        share, band = round(100 * v["material_share"]), v["deadband_pct"]
+        return f"{v['series']}, {share}% material, deadband {band} %, base {v['base_month']}"
     return "none" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v)
 
 

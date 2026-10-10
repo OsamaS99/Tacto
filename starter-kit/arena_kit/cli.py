@@ -1,5 +1,6 @@
-"""`arena` command line: register, list cases, play one case or a whole set, show the board,
-run the MCP server."""
+"""`arena` command line: register, list cases, play one case or a whole set, compare agents on
+local cases (`eval`), show the board, run the MCP server. `run --set final` reads only the case
+list, sessions and threads - never the board, results, events or screen (they are for people)."""
 
 import argparse
 import functools
@@ -26,11 +27,18 @@ def load_env(path=".env"):
                 os.environ.setdefault(key.strip(), value)
 
 
-def agent_factory(name, data):
+AGENTS = ["naive", "llm", "buyer"]
+
+
+def agent_factory(name, data, llm=True):
     from .agents import LLMAgent, NaiveAgent, llm_from_env
 
     if name == "naive":
         return NaiveAgent
+    if name == "buyer":
+        from .buyer import make_buyer_factory
+
+        return make_buyer_factory(data, llm)
     package = None
     if data:
         from .data import DataPackage
@@ -39,6 +47,17 @@ def agent_factory(name, data):
         package.lookup("")  # build the ID index once, before agents share it
     complete = llm_from_env()
     return lambda: LLMAgent(complete, package)
+
+
+def table_factory(name):
+    """`new_table(client, case=None)`: the buyer writes each move down before sending it (one Store
+    for the run), so a restart re-sends it with its id; other agents use the plain table."""
+    if name != "buyer":
+        return RemoteTable
+    from .buyer.store import Store
+    from .buyer.transport import DurableTable
+
+    return functools.partial(DurableTable, store=Store())
 
 
 def summary(result):
@@ -50,8 +69,10 @@ def main(argv=None):
     load_env()
     ap = argparse.ArgumentParser(prog="arena")
     ap.add_argument("-v", "--verbose", action="store_true")
-    verbose = argparse.ArgumentParser(add_help=False)  # -v also after the command
+    ap.add_argument("--log", metavar="FILE", help="also write the log (INFO and up) to this file")
+    verbose = argparse.ArgumentParser(add_help=False)  # -v and --log also after the command
     verbose.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
+    verbose.add_argument("--log", metavar="FILE", default=argparse.SUPPRESS)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser = functools.partial(sub.add_parser, parents=[verbose])
     r = sub.add_parser(
@@ -65,32 +86,64 @@ def main(argv=None):
     c.add_argument("--set", **sets)
     p = sub.add_parser("play", help="play one case")
     p.add_argument("case_id")
-    p.add_argument("--agent", default="naive", choices=["naive", "llm"])
+    p.add_argument("--agent", default="naive", choices=AGENTS)
     p.add_argument("--data", **data)
     a = sub.add_parser("run", help="play every case of a set in parallel")
     a.add_argument("--set", **sets)
-    a.add_argument("--agent", default="naive", choices=["naive", "llm"])
+    a.add_argument("--agent", default="naive", choices=AGENTS)
     a.add_argument("--data", **data)
     a.add_argument("--parallel", type=int, default=8, help="cases at once (at most 10)")
     a.add_argument("--waves", type=int, default=5, help="final: stop after this many waves have closed")
     d = sub.add_parser("data", help="download and unpack the data (package, Sunday release once public)")
     d.add_argument("--out", default="data", help="folder to unpack into")
+    e = sub.add_parser("eval", help="compare agents on local cases in an in-process arena-sim")
+    e.add_argument("--agents", default="naive,buyer", help=f"comma-separated, of {', '.join(AGENTS)}")
+    e.add_argument("--cases", default="eval_cases", help="folder of case files")
+    e.add_argument("--repeat", type=int, default=1, help="plays per agent and case")
+    e.add_argument("--clock", action="store_true", help="the 60-second rule and a wave's cap, as in the final")
+    e.add_argument("--parallel", type=int, default=3, help="cases at once")
+    e.add_argument("--data", **data)
+    e.add_argument("--llm", action="store_true", help="buyer: let it call the model (default: rules and templates)")
+    z = sub.add_parser("analyze", help="read buyer run logs (runs/...) and name what went wrong")
+    z.add_argument("paths", nargs="+", help="events/session files or folders")
     sub.add_parser("me", help="your team: practice quota used and left, best score per case")
     b = sub.add_parser("board", help="show the leaderboard")
     b.add_argument("--set", **sets)
     m = sub.add_parser("mcp", help="run the read-only MCP server over the data (stdio)")
     m.add_argument("--data", **data)
     args = ap.parse_args(argv)
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO if args.verbose else logging.WARNING)
+    handlers = [console]
+    if args.log:  # the full INFO log to a file, whatever the console shows
+        handlers.append(logging.FileHandler(args.log, encoding="utf-8"))
     logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
+        level=logging.INFO if args.verbose or args.log else logging.WARNING,
         format="%(asctime)s %(message)s",
         datefmt="%H:%M:%S",
+        handlers=handlers,
     )
 
     if args.cmd == "mcp":
         from .mcp_server import main as serve
 
         return serve(args.data)
+    if args.cmd == "eval":  # local only: an in-process arena-sim, never the arena
+        from .evaluate import cases_folder, evaluate, report
+
+        names = [n.strip() for n in args.agents.split(",") if n.strip()]
+        if unknown := set(names) - set(AGENTS):
+            raise SystemExit(f"unknown agents: {sorted(unknown)}")
+        factories = {n: agent_factory(n, args.data, args.llm) for n in names}
+        out = evaluate(factories, cases_folder(args.cases), args.repeat, args.clock, max(1, args.parallel))
+        print(report(out))
+        return
+    if args.cmd == "analyze":  # offline: the run's files, never the arena
+        from .buyer.model import model_from_env
+        from .buyer.replay import analyze
+
+        print(json.dumps(analyze(args.paths, model_from_env()), indent=2, ensure_ascii=False))
+        return
     client = ArenaClient()
     if args.cmd == "register":
         out = client.register(args.team_name, args.event_code)
@@ -117,7 +170,7 @@ def main(argv=None):
             else:
                 print(f"{name}: public from {info.get('at')}")
     elif args.cmd == "play":
-        table = RemoteTable(client)
+        table = table_factory(args.agent)(client)
         try:
             result = play(table, args.case_id, agent_factory(args.agent, args.data)())
         except ArenaError as e:  # e.g. not hosted, the quota, a paused key: the arena says why
@@ -127,11 +180,13 @@ def main(argv=None):
         if replay:  # the supplier's reasons, move by move: read it, improve, play again
             print(f"replay: {os.environ['ARENA_URL'].rstrip('/')}{replay}")
     elif args.set == "final":  # waits for each wave and plays its cases within the cap
-        out = play_waves(client, agent_factory(args.agent, args.data), args.waves, min(args.parallel, 10))
+        new_agent, new_table = agent_factory(args.agent, args.data), table_factory(args.agent)
+        out = play_waves(client, new_agent, args.waves, min(args.parallel, 10), new_table=new_table)
     else:
         ids = [case["case_id"] for case in hosted(client.cases(args.set))]
+        new_table = table_factory(args.agent)
         out = play_all(
-            lambda: RemoteTable(client),
+            lambda: new_table(client),
             ids,
             agent_factory(args.agent, args.data),
             min(args.parallel, 10),

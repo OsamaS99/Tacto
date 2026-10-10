@@ -306,3 +306,12 @@ def test_each_wave_plays_to_its_own_cap(sim, monkeypatch):
     script = [[(*one, True)], [(*one, False), (*two, True)], [(*one, False), (*two, False)]]
     play_waves(Waves(team(url), script, caps={1: 480, 2: 600}), NaiveAgent, waves=2, poll=0)
     assert 470 < seen["case:S01"] <= 480 and 590 < seen["case:S02"] <= 600  # 8 minutes; wave 2 extended by 2
+
+
+def test_an_index_clause_in_a_quote_reads_back():
+    from arena_kit.docs import read_document
+    from arena_kit.sim import pdf
+
+    clause = {"series": "AS-14404", "material_share": 0.6, "deadband_pct": 5.0, "base_month": "2026-08"}
+    text = read_document("quote.pdf", pdf("Quote", [("Our standard terms", {"index_clause": clause})]))
+    assert quote_terms(text)["standard"]["index_clause"] == clause

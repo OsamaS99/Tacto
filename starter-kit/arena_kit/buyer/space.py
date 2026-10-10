@@ -8,6 +8,7 @@ import math
 from ..cost import closing_terms, must_haves_ok
 
 MAX_COMBOS = 20_000
+EXACT = 600  # free combinations up to this are enumerated; beyond, coordinate descent
 
 
 def _unique(values):
@@ -16,6 +17,13 @@ def _unique(values):
         if v not in out:  # dicts (index clauses) are unhashable: compare by value
             out.append(v)
     return out
+
+
+def _product(values):
+    n = 1
+    for v in values:
+        n *= len(v)
+    return n
 
 
 class ContractSpace:
@@ -38,28 +46,30 @@ class ContractSpace:
     def combos(self, std=None):
         """Every combination of the non-price fields (dicts without unit_price); None if too many."""
         values = [self.options(f, std) for f in self.levers]
-        n = 1
-        for v in values:
-            n *= len(v)
-        if n > MAX_COMBOS:
+        if _product(values) > MAX_COMBOS:
             return None
         return [dict(zip(self.levers, combo, strict=True)) for combo in itertools.product(*values)]
 
     def complete(self, terms, std, cost):
-        """A full term sheet: exactly the negotiable fields. Fields `terms` leaves out get the value
-        with the lowest `cost(terms)` (coordinate descent, two passes); every value is snapped."""
+        """A full term sheet: exactly the negotiable fields. Fields `terms` leaves out get the values
+        with the lowest `cost(terms)` that keep the must-haves (exact when the combinations are few,
+        else coordinate descent); every value is snapped."""
         out = {f: self.snap(f, terms[f], std) for f in self.levers if f in terms}
         out["unit_price"] = round(float(terms["unit_price"]), 2)
         free = [f for f in self.levers if f not in terms]
-        for f in free:  # a start value, so every field is present before the descent
-            out[f] = self.options(f, std)[0]
+        values = [self.options(f, std) for f in free]
 
         def key(t):  # a must-have broken costs everything
             return cost(t) if must_haves_ok(self.case, t, std) else math.inf
 
-        for _ in range(2):
-            for f in free:
-                out[f] = min(self.options(f, std), key=lambda v, f=f: key({**out, f: v}))
+        if _product(values) <= EXACT:
+            fills = (dict(zip(free, combo, strict=True)) for combo in itertools.product(*values))
+            out.update(min(fills, key=lambda fill: key({**out, **fill})))
+        else:
+            out.update({f: v[0] for f, v in zip(free, values, strict=True)})
+            for _ in range(2):
+                for f, opts in zip(free, values, strict=True):
+                    out[f] = min(opts, key=lambda v, f=f: key({**out, f: v}))
         return {f: out[f] for f in self.negotiable}
 
     def snap(self, field, value, std=None):

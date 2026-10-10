@@ -14,7 +14,7 @@ SCENARIO = {"low": 0, "mid": 1, "high": 2}  # index into SupplierEstimate.full_c
 def estimate_supplier(dossier, sid, price, cash_pressure=False):
     """Full cost from the supplier's should-cost row, else the generic one, else 92 % of its price
     (the should-cost error of 5-15 % sets the spread). Cash pressure raises its cost of money."""
-    found = dossier.should_cost.get(sid) or dossier.should_cost.get("*") if dossier else None
+    found = (dossier.should_cost.get(sid) or dossier.should_cost.get("*")) if dossier else None
     if found:
         cost, conf = found
         spread, source = max(conf, 5.0) / 100, "should-cost"
@@ -52,8 +52,10 @@ class EconomicEvaluator:
         return total_cost(self.case, terms, self.std.get(sid), self.supplier(sid, scenario))
 
     def c_alt(self):
+        """C of the alternative; infinite without one (`kind: none`, or terms without a price)."""
         alt = self.case["buyer"].get("alternative") or {}
-        return total_cost(self.case, alt["terms"]) if alt.get("terms", {}).get("unit_price") else math.inf
+        terms = alt.get("terms") or {}
+        return total_cost(self.case, terms) if terms.get("unit_price") else math.inf
 
     def cash_theirs(self, sid, terms):
         est = self.estimates.get(sid)
@@ -70,7 +72,7 @@ class EconomicEvaluator:
 
     def best_price(self, sid, terms):
         """The price below which C rises again (relationship goals: squeezing costs); 0 without."""
-        if not self.relationship:
+        if self.supplier(sid) is None:
             return 0.0
         lo, hi = 0.3 * terms["unit_price"], 1.5 * terms["unit_price"]
         for _ in range(60):  # golden section: C is convex in the price
@@ -79,17 +81,17 @@ class EconomicEvaluator:
                 hi = b
             else:
                 lo = a
-        return round((lo + hi) / 2, 2)
+        return math.ceil((lo + hi) / 2 * 100) / 100
 
     def price_for(self, sid, terms, target_c):
-        """The highest price (cents, rounded down) at which `terms` costs at most `target_c`, not
-        below `best_price`; None if even that price costs more."""
+        """The highest price in cents at which `terms` costs at most `target_c` (+1 cent: C is rounded),
+        not below `best_price`; None if even that price costs more."""
         floor = self.best_price(sid, terms)
         p0 = max(terms["unit_price"], floor + 1.0)
         c0, c1 = self.c(sid, {**terms, "unit_price": p0}), self.c(sid, {**terms, "unit_price": p0 + 1})
         if c1 - c0 <= 0:
             return None
-        if not self.relationship:  # C is linear in the price
+        if not floor:  # no relationship term: C is linear in the price
             p = p0 + (target_c - c0) / (c1 - c0)
         else:  # increasing above best_price: bisect
             lo, hi = floor, p0
@@ -99,7 +101,9 @@ class EconomicEvaluator:
                 mid = (lo + hi) / 2
                 lo, hi = (mid, hi) if self.c(sid, {**terms, "unit_price": mid}) <= target_c else (lo, mid)
             p = lo
-        p = math.floor(p * 100) / 100
-        if p <= 0 or p < floor or self.c(sid, {**terms, "unit_price": p}) > target_c + 0.01:
-            return None
-        return p
+        p = round(p, 2)
+        for _ in range(3):  # the nearest cent, else the cents below it, until C fits
+            if self.c(sid, {**terms, "unit_price": p}) <= target_c + 0.01:
+                return p if p > 0 and p >= floor else None
+            p = round(p - 0.01, 2)
+        return None

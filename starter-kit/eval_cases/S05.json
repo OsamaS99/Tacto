@@ -1,0 +1,149 @@
+{
+ "case_id": "case:S05",
+ "set": "practice",
+ "type": "rfq",
+ "title": "Impeller HN 200: three quotes",
+ "briefing": "Synthetic eval case. You buy part:310030 from one of sup:70120, sup:70140, sup:70190. Need: 14000 pc a year for 2 years. The supplier in the simulator is a plain script, not a real bot.",
+ "trigger_doc": null,
+ "parts": [
+  "part:310030"
+ ],
+ "suppliers": [
+  "sup:70120",
+  "sup:70140",
+  "sup:70190"
+ ],
+ "negotiable": [
+  "unit_price",
+  "payment_days",
+  "lead_time_days",
+  "incoterm"
+ ],
+ "fixed_terms": {
+  "volume_per_year": 14000,
+  "contract_months": 24,
+  "index_clause": null,
+  "tooling_eur": 0
+ },
+ "term_options": {
+  "payment_days": [
+   30,
+   45,
+   60,
+   90
+  ],
+  "lead_time_days": [
+   56,
+   49,
+   42
+  ],
+  "incoterm": [
+   "FCA",
+   "EXW",
+   "DAP"
+  ]
+ },
+ "buyer": {
+  "interest_rate": 0.08,
+  "reference_payment_days": 60,
+  "fallback_risk_pct": 3,
+  "index_risk_pct": 1,
+  "late_cost_per_day": 200,
+  "cost_per_defect": 50,
+  "index_paths": {},
+  "must_haves": [],
+  "alternative": {
+   "kind": "quote",
+   "ref": "quote:7100009",
+   "terms": {
+    "unit_price": 37.9,
+    "payment_days": 45,
+    "lead_time_days": 55,
+    "incoterm": "FCA"
+   }
+  },
+  "need_per_year": 14000,
+  "horizon_years": 2,
+  "current_unit_price": 33.8,
+  "fallback_unit_price": 38.9,
+  "need_lead_time_days": 49,
+  "category_goal": "leverage",
+  "freight_eur_per_unit": {
+   "EXW": 1.1,
+   "FCA": 0.7,
+   "DAP": 0.0
+  }
+ },
+ "round_limit": 10,
+ "refs": [
+  "sc:70120@2026Q3",
+  "sc:70140@2026Q3",
+  "sc:70190@2026Q3",
+  "quote:7100009",
+  "quote:7100010",
+  "quote:7100011",
+  "cost:310030"
+ ],
+ "facts": {
+  "sc:70120@2026Q3": {
+   "colour": "amber",
+   "otd_confirmed_pct": 78.2,
+   "otd_pct": 74.5,
+   "ppm": 734,
+   "quarter": "2026Q3",
+   "supplier": "sup:70120"
+  },
+  "sc:70140@2026Q3": {
+   "colour": "red",
+   "otd_confirmed_pct": 73.1,
+   "otd_pct": 63.5,
+   "ppm": 2376,
+   "quarter": "2026Q3",
+   "supplier": "sup:70140"
+  },
+  "sc:70190@2026Q3": {
+   "colour": "amber",
+   "otd_confirmed_pct": 85.1,
+   "otd_pct": 85.1,
+   "ppm": 715,
+   "quarter": "2026Q3",
+   "supplier": "sup:70190"
+  },
+  "quote:7100009": {
+   "date": "2025-09-23",
+   "incoterm": "FCA",
+   "lead_time_days": 55,
+   "part": "part:310030",
+   "payment_days": 45,
+   "price_unit": 1,
+   "supplier": "sup:70120",
+   "unit_price": 37.9
+  },
+  "quote:7100010": {
+   "date": "2025-09-23",
+   "incoterm": "FCA",
+   "lead_time_days": 58,
+   "part": "part:310030",
+   "payment_days": 60,
+   "price_unit": 1,
+   "supplier": "sup:70140",
+   "unit_price": 32.9
+  },
+  "quote:7100011": {
+   "date": "2025-09-23",
+   "incoterm": "FCA",
+   "lead_time_days": 52,
+   "part": "part:310030",
+   "payment_days": 30,
+   "price_unit": 1,
+   "supplier": "sup:70190",
+   "unit_price": 36.8
+  },
+  "cost:310030": {
+   "confidence_pct": 5,
+   "part": "part:310030",
+   "price_unit": 1,
+   "unit_cost": 35.98
+  }
+ }
+}

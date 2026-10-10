@@ -16,6 +16,7 @@ class Claim:
     strength: float = 1.0  # higher first
     suppliers: tuple[str, ...] = ()  # empty: about every supplier of the case
     per_supplier: bool = False  # a rival's quote/offer counts once per supplier
+    value: float | None = None  # price-type claims: the EUR figure in the case's price unit
 
 
 @dataclass(slots=True)
@@ -73,6 +74,7 @@ class SupplierThreadState:
     claim_results: list[dict] = field(default_factory=list)
     last_body: str = ""
     rev: int = 0  # messages in the thread: the canonical state revision
+    label: dict | None = None  # Decision Selector labels for its last message (tune walk risk, never price)
 
 
 @dataclass(slots=True)

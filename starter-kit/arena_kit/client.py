@@ -1,6 +1,7 @@
 """Thin HTTP client for the arena API. Every method returns the JSON the server sends."""
 
 import os
+import re
 import threading
 import time
 import uuid
@@ -30,6 +31,32 @@ class ArenaError(Exception):
         self.status, self.detail = status, detail
 
 
+# What an error means for the negotiation, read from its status and the arena's words.
+LATE, ENDED, ROUND_LIMIT, ALREADY_PLAYED = "LATE", "ENDED", "ROUND_LIMIT", "ALREADY_PLAYED"
+INVALID, RATE, OPEN_SESSIONS, QUOTA, SERVER = "INVALID", "RATE", "OPEN_SESSIONS", "QUOTA", "SERVER"
+
+
+def classify(error):
+    """One of the kinds above; None for what is not about a move (a wrong key, an unknown case).
+    A dropped connection is SERVER: whether the arena got the request is unknown."""
+    if not isinstance(error, ArenaError):
+        return SERVER if isinstance(error, httpx.TransportError) else None
+    status, detail = error.status, str(error.detail).lower()
+    if status == 409:
+        if "round limit" in detail:
+            return ROUND_LIMIT
+        if "one session per case" in detail or "already played" in detail:
+            return ALREADY_PLAYED
+        return LATE if re.search(r"\blate\b", detail) else ENDED  # thread, session or wave over
+    if status in (413, 422):  # nothing happened, no round used
+        return INVALID
+    if status == 429:
+        return QUOTA if detail.startswith("practice limit") else OPEN_SESSIONS if "open sessions" in detail else RATE
+    if status >= 500:
+        return SERVER
+    return ENDED if status == 403 and "not running" in detail else None
+
+
 class ArenaClient:
     def __init__(
         self,
@@ -57,8 +84,9 @@ class ArenaClient:
         if wait > 0:
             time.sleep(wait)
 
-    def _call(self, method, path, body=None, params=None, raw=False):
-        headers = {MOVE_ID_HEADER: uuid.uuid4().hex} if method == "POST" else {}
+    def _call(self, method, path, body=None, params=None, raw=False, move_id=None):
+        # a caller's move id (persisted before the call) survives a restart; else one per call
+        headers = {MOVE_ID_HEADER: move_id or uuid.uuid4().hex} if method == "POST" else {}
         for attempt in range(self.retries + 1):
             self._pace()
             try:
@@ -98,10 +126,11 @@ class ArenaClient:
     def open_session(self, case_id):
         return self._call("POST", "/sessions", {"case_id": case_id})
 
-    def send_message(self, session_id, supplier_id, message):
-        """Your e-mail to one supplier; returns its reply (or the result, if `action` closes)."""
+    def send_message(self, session_id, supplier_id, message, move_id=None):
+        """Your e-mail to one supplier; returns its reply (or the result, if `action` closes).
+        `move_id`: repeat a request with its id and the arena answers it once, not twice."""
         path = f"/sessions/{session_id}/threads/{supplier_id}/messages"
-        return self._call("POST", path, {"message": message})
+        return self._call("POST", path, {"message": message}, move_id=move_id)
 
     def thread(self, session_id, supplier_id):
         return self._call("GET", f"/sessions/{session_id}/threads/{supplier_id}")

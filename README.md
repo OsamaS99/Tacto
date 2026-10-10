@@ -1,3 +1,46 @@
+# Our buyer agent (team submission)
+
+`starter-kit/arena_kit/buyer/` is an autonomous buyer for Hollerau Pumpenwerke. Code owns every
+number: total cost C, the packages, when to accept or walk away. The language model reads supplier
+replies and writes the e-mails inside a guard. Design, prompts, state flow and evaluation:
+[starter-kit/docs/BUYER.md](starter-kit/docs/BUYER.md).
+
+## Run it
+
+```bash
+cd starter-kit
+uv sync --all-extras
+cp .env.example .env        # then set the variables below
+uv run arena data           # data package (+ Sunday release after 08:00 on Sunday)
+uv run arena me             # the key works
+uv run arena eval --agents naive,buyer --cases eval_cases   # local simulator, no quota
+uv run arena run --set final --agent buyer --parallel 10    # the Live Final (start before 12:00)
+```
+
+## Environment variables (names only; values never go in the repo)
+
+| Variable | Purpose |
+|---|---|
+| `ARENA_URL` | arena base URL |
+| `ARENA_API_KEY` | team key |
+| `ARENA_DATA` | data package folder (default: found next to the kit) |
+| `ARENA_RELEASE` | Sunday release folder, if not next to the package |
+| `LLM_PROVIDER` | `openai` (any OpenAI-compatible endpoint) or `anthropic` |
+| `LLM_BASE_URL` | endpoint for `openai` |
+| `LLM_API_KEY` | model key (`ANTHROPIC_API_KEY` for `anthropic`) |
+| `LLM_MODEL` | turn model (we run `gpt-6.1-sol`) |
+| `LLM_EFFORT` | reasoning effort for the turn model (`medium`) |
+| `LLM_FALLBACK_MODEL` | faster model when the turn model is slow or fails (`gpt-6-luna`) |
+| `DECISIONS_ENABLED`, `DECISIONS_MODEL` | optional reply classifier via OpenAI Decisions (`gpt-6-luna`) |
+| `LLM_TURN` | `0` = template e-mails only, no model calls |
+| `BUYER_CONCURRENT` | `0` = serve RFQ threads one at a time (default) |
+| `BUYER_RUNS` | folder for session state and event logs (default `runs/`) |
+
+Without a model the buyer still plays every case: the deterministic policy and the template
+e-mail never depend on the model.
+
+---
+
 <p align="center">
   <img src=".github/assets/readme-banner.png" alt="Tacto Negotiation Arena. Your agent. Our suppliers. Real money." width="100%">
 </p>
