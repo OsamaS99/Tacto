@@ -43,6 +43,7 @@ def disclosure(cs, t, proposal, claims):
         their_last=t.last_body[:1500],
         allowed_numbers=frozenset(numbers),
         subject=f"Re: {cs.case['title']}",
+        status=t.status,
     )
 
 
@@ -88,6 +89,7 @@ def write_turn(model, pkt, budget_s, case_id="", focus=""):
         claims="\n".join(f"{i}: {c.sentence}" for i, c in claims.items()) or "(none)",
         questions=", ".join(QUESTION_KINDS),
         message_id=f"msg-{pkt.rev}",
+        status=pkt.status,
         their_last=pkt.their_last or "(none)",
     )
     source = "llm"

@@ -150,6 +150,7 @@ class DisclosurePacket:
     their_last: str
     allowed_numbers: frozenset[str]
     subject: str
+    status: str = "open"  # the supplier's offer status: open | final_offer | agreed
 
 
 @dataclass(frozen=True, slots=True)
