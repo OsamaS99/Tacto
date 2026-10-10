@@ -539,3 +539,38 @@ def test_final_retry_skips_new_model_preparation_after_first_attempt(monkeypatch
 
     assert runtime.play_retrying(Retry, case()["case_id"], Prepared, resume=True)["deal"]
     assert flags == [True, False]
+
+
+def test_three_independently_delayed_suppliers_close_after_all_pending_replies():
+    import time
+
+    class Three(Table):
+        supplier_parallel = 3
+
+        def __init__(self):
+            super().__init__()
+            self.case["suppliers"].append("sup:C")
+            self.events["sup:C"] = [offer("sup:C", 18)]
+            self.all_sent = threading.Event()
+
+        def send(self, sid, message):
+            with self.lock:
+                self.inflight.add(sid)
+                self.log.append(("send", sid))
+                if len(self.inflight) == 3:
+                    self.all_sent.set()
+            assert self.all_sent.wait(2), "supplier replies must not serialize behind a global lock"
+            time.sleep({"sup:A": 0.04, "sup:B": 0.02, "sup:C": 0.01}[sid])
+            reply = offer(sid, {"sup:A": 14, "sup:B": 15, "sup:C": 16}[sid], 1)
+            with self.lock:
+                self.events[sid] += [{**message, "from": "buyer"}, reply]
+                self.inflight.remove(sid)
+                self.log.append(("reply", sid))
+            return reply
+
+    table, agent = Three(), Agent()
+    result = play(table, table.case["case_id"], agent)
+    assert result["supplier_id"] == "sup:A"
+    first_reply = next(i for i, x in enumerate(table.log) if x[0] == "reply")
+    assert all(("send", sid) in table.log[:first_reply] for sid in table.events)
+    assert table.log[-1] == ("close", "sup:A")

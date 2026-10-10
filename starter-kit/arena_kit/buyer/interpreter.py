@@ -63,7 +63,7 @@ def interpret(sid, message, *, model=None, decisions=None, budget_s=0, deadline=
     )
     refused = (
         ("breakdown",)
-        if re.search(r"do not disclose|confidential|figures stay|keine.*kosten|\\bintern(?:al)?\\b", body, re.I)
+        if re.search(r"do not disclose|confidential|figures stay|keine.*kosten|\bintern(?:al)?\b", body, re.I)
         else ()
     )
     answered = (

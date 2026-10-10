@@ -26,7 +26,7 @@ Preparation runs before opening. Direct callers supplying already-open threads r
 5. The communication role selects approved IDs. Code renders every public sentence. Private rationale is never sent. Claims are checked again against the selected package.
 6. Every send, acceptance and fallback passes contract and financial checks.
 
-Supplier-specific should-cost uses the high relationship scenario; weak priors use the middle scenario. Bidding, ranking and acceptance share the same choice. All scenarios remain available for diagnosis. `cost.py` remains the single source of truth.
+Bidding and ranking use the middle relationship scenario for all estimate sources. Acceptance eligibility compares cost without the uncertain relationship penalty against the alternative. This deliberate distinction prevents weak priors from forcing a walk-away; traces label both costs and the estimate source. High and low scenarios remain available for diagnosis. `cost.py` remains the single source of truth.
 
 ## Deadlines and recovery
 
