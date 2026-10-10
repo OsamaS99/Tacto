@@ -73,9 +73,12 @@ def quote_terms(text):
 
 
 def standard_terms(events):
-    """The supplier's standard terms from the latest quote PDF in a thread (empty if none)."""
-    for msg in reversed(events):
+    """The supplier's standard terms from the quote PDFs in a thread, oldest to newest (empty if
+    none). A later quote that states a field leaves it out of its standard section - an agreed
+    quote states everything - so a field keeps the value an earlier quote gave it."""
+    out = {}
+    for msg in events:
         for att in msg.get("attachments") or []:
             if att.get("name", "").startswith("quote") and att.get("text"):
-                return quote_terms(att["text"]).get("standard", {})
-    return {}
+                out.update(quote_terms(att["text"]).get("standard", {}))
+    return out

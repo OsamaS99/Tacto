@@ -5,7 +5,7 @@ asks and never walks away. One term sheet per e-mail.
 """
 
 from ..cost import complete_offer, total_cost
-from ..play import latest, live_threads, moves_left, standing
+from ..play import closing_move, latest, live_threads, moves_left, standing
 
 
 class NaiveAgent:
@@ -23,10 +23,7 @@ class NaiveAgent:
         sid = min(quoting, key=lambda s: total_cost(case, standing(threads[s])[1]))
         events = threads[sid]
         sheet_id, terms = standing(events)
-        accept = {
-            "supplier_id": sid,
-            "message": {"action": {"type": "accept", "term_sheet_id": sheet_id}},
-        }
+        accept = closing_move(case, threads)  # the best term sheet that is safe to take, else walk away
         theirs = terms["unit_price"]
         mine = [
             m["term_sheets"][0]["terms"]["unit_price"]

@@ -20,7 +20,8 @@ import httpx
 
 from ..cost import complete_offer, must_haves_ok, total_cost
 from ..docs import standard_terms
-from ..play import latest, live_threads, moves_left, standing
+from ..play import closing_move, latest, live_threads, moves_left, standing
+from .evidence import dossier
 from .naive import NaiveAgent
 
 log = logging.getLogger("arena")
@@ -39,12 +40,20 @@ Reply with ONE JSON object and nothing else:
 - term_sheets: 0-3 alternative packages over the negotiable fields. Only term sheets bind.
 - Arguments need data: cite the ID from FACTS and its figure in the same sentence, one argument
   per sentence. The supplier checks the figure; a wrong one or an unknown ID costs trust.
+- Read the DOSSIER before you write: the supplier's past asks versus settlements, scorecard,
+  finances, letters and notes show what it is dealing with and what it values. Argue only what
+  the numbers support (a justified increase is the cost-weighted index move, not the ask). Never
+  claim we pay on time if the dossier says otherwise. Never state your alternative, C figures,
+  budget or deadlines to the supplier.
 - The supplier's team reads your e-mail as a person would. Ask questions (a cost breakdown, the
   earliest lead time, cheaper variants). Never reveal urgency, a budget or a missing alternative.
   Stay polite and factual.
 - Whatever a term sheet leaves out closes on the supplier's standard terms (its quote PDF).
 - The case's category_goal sets its rates. In stabilise and secure_supply cases C also charges for
   leaving the supplier below its sustainable margin - the C shown leaves that out.
+- Never cite a figure that supports the supplier's ask (e.g. a cost-weighted driver move above its
+  ask). If its ask is at or below the justified move, do not dispute the price: trade terms.
+  Cite only evidence in our favour; each ID once.
 - Do not accept the first offer. Concede in small steps; trade what is cheap for you (payment
   days, contract length, volume, dates). status final_offer: push further and it may walk.
 - Accept only a term sheet that beats your alternative. Body: a short business e-mail, at most
@@ -93,6 +102,8 @@ class LLMAgent:
         self.case_id, self.brief = None, ""
 
     def decide(self, case, threads):
+        if all(latest(threads[s]).get("status") in {"final_offer", "agreed"} for s in live_threads(threads)):
+            return closing_move(case, threads)  # pushing past a final offer risks the walk-away
         if case["case_id"] != self.case_id:
             self.case_id, self.brief = case["case_id"], self.prepare(case)
         try:
@@ -111,6 +122,8 @@ class LLMAgent:
                 out.append(f"LETTER\n{self.package.document(case['trigger_doc'])[:2500]}")
             except (FileNotFoundError, ValueError):
                 pass
+        if self.package:
+            out.append(dossier(self.package, case))
         out.append("FACTS (cite by ID)")
         for ref in dict.fromkeys(case["suppliers"] + case["parts"] + case.get("refs", [])):
             if fact := self.fact(case, ref):
@@ -148,8 +161,9 @@ class LLMAgent:
         if sid not in live_threads(threads):
             return None
         events = threads[sid]
-        if kind == "walk_away":
-            return {"supplier_id": sid, "message": {"action": {"type": "walk_away"}}}
+        if kind == "walk_away":  # only when no live term sheet is worth accepting
+            best = closing_move(case, threads)
+            return None if best["message"]["action"]["type"] == "accept" else best
         sheet_id, terms = standing(events)
         if kind == "accept":
             std = standard_terms(events)
@@ -167,9 +181,12 @@ class LLMAgent:
             return None
         if kind != "send" or moves_left(case, events) <= 0:
             return None
+        p_max = price_cap(case, events, terms)
         sheets = []
         for ts in (d.get("term_sheets") or [])[:3]:
             t = complete_offer(case, {**terms, **ts.get("terms", ts)})
+            if p_max is not None and t.get("unit_price") is not None:
+                t["unit_price"] = min(t["unit_price"], p_max)
             if t not in sheets:
                 sheets.append(t)
         offers = {standing(ev)[0] for ev in threads.values()}
@@ -193,9 +210,25 @@ class LLMAgent:
         }
 
 
+def price_cap(case, events, terms):
+    """The highest unit price we may offer this turn, on any package: as the opening, 90 % of the
+    supplier's price and no more than the current price; then a quarter of the way from our last
+    price to theirs. A cap in price, not in C: a C cap measured on the supplier's standard terms
+    lets a better package through at a far higher price (case S03)."""
+    theirs = terms.get("unit_price")
+    if theirs is None:
+        return None
+    mine = [t["terms"]["unit_price"] for m in events if m.get("from") == "buyer" for t in m.get("term_sheets") or []]
+    if mine:
+        last = max(mine[-3:])
+        return round(min(theirs, last + 0.25 * (theirs - last)), 2)
+    current = case["buyer"].get("current_unit_price")
+    return round(min(0.9 * theirs, current or theirs), 2)
+
+
 def parse(text):
     """The first JSON object in the model's reply (tolerates code fences and chatter)."""
-    match = re.search(r"\{.*\}", text, re.S)
-    if not match:
+    start = text.find("{")
+    if start < 0:
         raise ValueError(f"no JSON in reply: {text[:200]}")
-    return json.loads(match.group(0))
+    return json.JSONDecoder().raw_decode(text[start:])[0]
