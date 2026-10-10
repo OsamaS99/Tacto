@@ -14,13 +14,15 @@ NUM_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?!\w)")
 DATE_RE = re.compile(r"\b\d{4}-\d{2}(?:-\d{2})?\b")
 SENT_RE = re.compile(r"(?<=[.!?])\s+")
 PH_RE = re.compile(r"(\x00[A-Z]\x00)")
-# our position, never said: budget, time pressure, our C, how dependent we are, internal figures
+# never said: budget, time pressure, our C, how dependent we are, internal figures - and a
+# promise to send or come back that we never keep (case P11: four IOUs, flagged in every reply)
 BLOCK = re.compile(
     r"\bbudget|\bdeadline|\burgen(?:t|cy|tly)\b|\bmust close\b|\btime pressure\b|\bwalk[- ]?away\b"
     r"|\bour (?:total )?costs?\b|\btotal cost\b|\bC\s*=|\breservation\b|\btarget price\b|\binternal\b"
     r"|\bjustified (?:move|increase)\b|\bno (?:other|alternative) (?:supplier|source|option)s?\b"
     r"|\bonly (?:supplier|source)\b|\bsingle source\b|\bdepend(?:ent|ence)? on you\b"
-    r"|\bpay(?:ing)? (?:you )?(?:on time|promptly|punctually)\b|\b(?:on-time|punctual) payment",
+    r"|\bpay(?:ing)? (?:you )?(?:on time|promptly|punctually)\b|\b(?:on-time|punctual) payment"
+    r"|\b(?:come|get) back to\b|\bwill (?:send|provide|share|forward)\b",
     re.I,
 )
 # rivals: fair game in an RFQ, a leak of our alternative anywhere else
@@ -29,6 +31,7 @@ RIVAL = re.compile(
     r"|\banother (?:supplier|bidder|offer|quote)\b|\bcompetit(?:or|ors|ion|ive (?:offer|quote|bid))\b|\bcompeting\b",
     re.I,
 )
+TOPIC = {"qn": "sc"}  # claim kinds that make the same point
 SMALL = {1.0, 2.0, 3.0}  # counting words ("our 2 packages") leak nothing
 MAX_CLAIMS, MAX_IDS, MAX_SHEETS, MAX_SUBJECT, MAX_BODY, MAX_REFS = 3, 3, 3, 300, 8000, 20
 
@@ -51,7 +54,8 @@ def _fresh(cs, sid, c):
 
 
 def _favours(c, price):
-    """A price figure still argues for us against the supplier's standing price."""
+    """A price figure still argues for us against `price` (the lower of the supplier's standing price
+    and our dearest sheet: a figure above our own bid argues against it - case P18)."""
     if c.value is None or not price:
         return True
     return c.value < (0.97 * price if c.kind == "cost" else price)
@@ -59,24 +63,28 @@ def _favours(c, price):
 
 def _cap(claims, limit=MAX_CLAIMS):
     """In order: at most `limit` claims, MAX_IDS checked IDs, no ID twice, one claim per kind
-    except index moves."""
+    except index moves - a scorecard and a complaint are one kind (one quality figure per message:
+    case P11 had both read as one claim, and the lot ppm contradicted the scorecard)."""
     out, ids, kinds = [], set(), set()
     for c in claims:
+        kind = TOPIC.get(c.kind, c.kind)
         if len(out) == limit or sum(map(_weight, out)) + _weight(c) > MAX_IDS:
             continue
-        if ids & set(c.ids) or (c.kind in kinds and c.kind != "idx"):
+        if ids & set(c.ids) or (kind in kinds and kind != "idx"):
             continue
         out.append(c)
         ids |= set(c.ids)
-        kinds.add(c.kind)
+        kinds.add(kind)
     return out
 
 
-def pick_claims(cs, sid, limit=MAX_CLAIMS):
-    """The strongest unused claims for this supplier that still favour us."""
+def pick_claims(cs, sid, limit=MAX_CLAIMS, bid=None):
+    """The strongest unused claims for this supplier that still favour us; `bid`: the dearest price
+    we send with them."""
     menu = list(cs.dossier.claims) if cs.dossier is not None else []
     menu += rival_claims(cs, sid)
     price = cs.threads[sid].standing.get("unit_price") if sid in cs.threads else None
+    price = min((p for p in (price, bid) if p), default=None)
     ok = [c for c in menu if _fresh(cs, sid, c) and _favours(c, price)]
     return tuple(_cap(sorted(ok, key=lambda c: -c.strength), limit))
 

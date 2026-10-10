@@ -31,16 +31,20 @@ def anchor_price(case, dossier, their_price, sid=None):
     return round(max(price, 0.5 * their_price), 2)
 
 
-def best_combo(ev, space, sid, price):
-    """The term sheet with the lowest C for us at `price`."""
-    return space.complete({"unit_price": price}, ev.std.get(sid), lambda t: ev.c(sid, t))
+def best_combo(ev, space, sid, price, prefer=None):
+    """The term sheet with the lowest C for us at `price` (ties: nearest the supplier's `prefer`)."""
+    return space.complete({"unit_price": price}, ev.std.get(sid), lambda t: ev.c(sid, t), prefer)
 
 
-def targets(case, dossier, ev, space, sid, opening_price, c_alt):
+def targets(case, dossier, ev, space, sid, opening_price, c_alt, market=None):
     """(C at our anchor, C we never bid beyond) for one supplier: the anchor on our best terms (not
     below the price that squeezes a strategic supplier), and at most its opening price on our best
-    terms or the alternative, whichever is cheaper."""
+    terms or the alternative, whichever is cheaper. `market`: the cheapest opening quote of the case -
+    in an RFQ no bidder's anchor sits above the one the cheapest quote gets (case P05: a dear
+    bidder agreed at once to an anchor above a rival's quote)."""
     anchor = anchor_price(case, dossier, opening_price, sid)
+    if market:
+        anchor = max(min(anchor, round(0.9 * market, 2)), round(0.5 * opening_price, 2))
     floor = ev.best_price(sid, best_combo(ev, space, sid, anchor))
     c_target = ev.c(sid, best_combo(ev, space, sid, max(anchor, floor)))
     c_res = min(c_alt, ev.c(sid, best_combo(ev, space, sid, opening_price)))
@@ -74,7 +78,7 @@ def generate(ev, space, sid, target_c, their_price, standing=None):
     variants that give the supplier more for the same C. Bounded in C, not in price - a dearer
     price on terms that save us more is fine."""
     std = ev.std.get(sid)
-    base = best_combo(ev, space, sid, their_price)
+    base = best_combo(ev, space, sid, their_price, standing)
     combos = space.combos(std)
     if combos is None or len(combos) > MAX_COMBOS:
         combos = [base] + [{**base, f: v} for f in space.levers for v in space.options(f, std) if v != base[f]]
@@ -93,13 +97,23 @@ def generate(ev, space, sid, target_c, their_price, standing=None):
     return out
 
 
-def select(evaluated, n=3):
+def select(evaluated, demand=None, ceiling=None, n=3):
     """Up to `n` diverse sheets: the one closest to our ideal terms (the highest price - simple
-    suppliers read the price), the one worth most to the supplier, and one more."""
+    suppliers read the price), the one worth most to the supplier, and one more. `demand(terms)`:
+    per lever, how much a sheet asks of the supplier - a sheet that asks more than another worth no
+    more to the supplier is never sent, ties go to the smaller ask. `ceiling`: the supplier's own price -
+    no sheet shows a dearer one while a sheet at or below it exists (cases P02, P18: it answered
+    near our dearest shown price)."""
     if not evaluated:
         return []
-    by_cash = sorted(evaluated, key=lambda e: -e.cash_theirs)
-    by_price = sorted(evaluated, key=lambda e: -e.terms["unit_price"])
+    if ceiling is not None:
+        below = [e for e in evaluated if e.terms["unit_price"] <= ceiling]
+        evaluated = below or [min(evaluated, key=lambda e: e.terms["unit_price"])]
+    pairs = [(e, demand(e.terms) if demand else {}) for e in evaluated]
+    if demand:
+        pairs = [(e, d) for e, d in pairs if not _dominated(e, d, pairs)]
+    by_cash = [e for e, _ in sorted(pairs, key=lambda p: (-p[0].cash_theirs, sum(p[1].values())))]
+    by_price = [e for e, _ in sorted(pairs, key=lambda p: (-p[0].terms["unit_price"], sum(p[1].values())))]
     picks = []
     for e in (by_price[0], by_cash[0], *by_cash[1:]):
         if len(picks) == n:
@@ -107,6 +121,20 @@ def select(evaluated, n=3):
         if all(_distance(e.terms, p.terms) > 0 for p in picks):
             picks.append(e)
     return picks
+
+
+def _dominated(e, d, pairs):
+    """Another sheet at no lower price and no less cash for the supplier asks no more on any lever,
+    and less somewhere (or pays more)."""
+    price = e.terms["unit_price"]
+    return any(
+        o.terms["unit_price"] >= price
+        and o.cash_theirs >= e.cash_theirs - 0.005
+        and all(od[f] <= d[f] for f in d)
+        and (o.terms["unit_price"] > price or od != d)
+        for o, od in pairs
+        if o is not e
+    )
 
 
 def _distance(a, b):

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from arena_kit.buyer.dossier import build_dossier, rival_claims
+from arena_kit.buyer.dossier import build_dossier, rival_claims, strength
 from arena_kit.buyer.guard import GuardReject, check_message, pick_claims
 from arena_kit.buyer.playbook import playbook
 from arena_kit.buyer.records import (
@@ -174,6 +174,27 @@ def test_rival_offers_only_when_cheaper_and_once_per_supplier():
     assert [c.cid for c in pick_claims(cs, "sup:B")] == ["offer:C-1"]
     assert [c.cid for c in pick_claims(cs, "sup:C")] == ["offer:A-1"]  # cited to B, still fresh for C
     assert rival_claims(state(CASE, None, {"sup:70210": ("offer:X", 10.0)}), "sup:70210") == []
+
+
+def test_no_price_figure_above_our_bid_and_one_quality_figure_per_message():
+    # case P18: an order price of 5.84 cited with our bid at 5.49; case P11: scorecard and lot ppm read as one claim
+    claims = [
+        Claim("po", ("po:1-10",), "Our last order was placed at 5.84 per unit.", "po", 4.0, value=5.84),
+        Claim("qn:A", ("qn:A",), "Complaint qn:A recorded 27778 ppm.", "qn", 3.9, ("sup:A",)),
+        Claim("sc:A", ("sc:A",), "Scorecard sc:A shows 2376 ppm.", "sc", 3.8, ("sup:A",)),
+    ]
+    cs = state({**CASE, "suppliers": ["sup:A"]}, EvidenceDossier("case:E01", claims), {"sup:A": ("offer:A-1", 6.10)})
+    assert [c.cid for c in pick_claims(cs, "sup:A")] == ["po", "qn:A"]  # one quality figure, not both
+    assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.49)] == ["qn:A"]
+    assert [c.cid for c in pick_claims(cs, "sup:A", bid=5.90)] == ["po", "qn:A"]
+    assert strength("quality", "sc") > strength("quality", "qn", 1.0)  # the rolling scorecard first (KNOWN_ISSUES 10)
+
+
+def test_check_message_drops_promises_we_never_keep():
+    # case P11: "we will come back to your request" four times, flagged in every reply
+    body = "We will come back to you with the quality data. We propose 4012.50 with 90 days. We will send the PO."
+    msg, _ = guarded(body)
+    assert "come back" not in msg.body and "send" not in msg.body and "We propose 4012.50 with 90 days." in msg.body
 
 
 def guarded(body, sheets=None, case=CASE, subject="Re: clamps", model_subject=None):

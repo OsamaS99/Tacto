@@ -56,11 +56,17 @@ class BuyerAgent:
         std = {sid: standard_terms(ev) for sid, ev in threads.items()}
         estimates = {}
         if self.playbook.relationship:
+            plain, margin = EconomicEvaluator(case, std), case["buyer"].get("sustainable_margin_pct") or 0.0
             for sid, ev in threads.items():
                 price = (latest(ev).get("term_sheets") or [{}])[0].get("terms", {}).get("unit_price")
                 if price:
                     cash = bool(self.dossier and self.dossier.cash_pressure.get(sid))
-                    estimates[sid] = estimate_supplier(self.dossier, sid, price, cash)
+                    sheets = [
+                        m["term_sheets"][0]["terms"] for m in ev if m.get("from") != "buyer" and m.get("term_sheets")
+                    ]
+                    worth = min(plain.cash_theirs(sid, s) for s in sheets if s.get("unit_price") is not None)
+                    cap = worth * (1 - margin / 100)  # its own ask pays it at least the sustainable margin
+                    estimates[sid] = estimate_supplier(self.dossier, sid, price, cash, cap)
         econ = EconomicEvaluator(case, std, estimates)
         for sid, ev in threads.items():
             last = latest(ev)
@@ -93,12 +99,14 @@ class BuyerAgent:
                     for ref in m.get("refs") or []:
                         (cited_to.setdefault(sid, set()) if ref.startswith(("quote:", "offer:")) else cited).add(ref)
         cs.cited, cs.cited_to = cited, cited_to
+        openings = {}
         for sid, ev in threads.items():
             first = next((m for m in ev if m.get("from") != "buyer" and m.get("term_sheets")), None)
-            opening = first and first["term_sheets"][0]["terms"].get("unit_price")
-            if not opening:
-                continue
-            cs.targets[sid] = bids.targets(case, self.dossier, econ, self.space, sid, opening, cs.c_alt)
+            if opening := first and first["term_sheets"][0]["terms"].get("unit_price"):
+                openings[sid] = opening
+        market = min(openings.values(), default=None)  # a quote that breaks a must-have is a price signal too
+        for sid, opening in openings.items():
+            cs.targets[sid] = bids.targets(case, self.dossier, econ, self.space, sid, opening, cs.c_alt, market)
         cs.tau = self.time_used()
         return cs, econ
 
@@ -138,7 +146,8 @@ class BuyerAgent:
         if proposal.kind == "walk":
             return {"supplier_id": proposal.sid, "message": {"action": {"type": "walk_away"}}}
         t = cs.threads[proposal.sid]
-        claims = pick_claims(cs, proposal.sid) if proposal.packages else ()  # a keep-alive argues nothing
+        bid = max((p.terms["unit_price"] for p in proposal.packages), default=None)
+        claims = pick_claims(cs, proposal.sid, bid=bid) if proposal.packages else ()  # a keep-alive argues nothing
         packet = disclosure(cs, t, proposal, claims)
         w0 = self.clock()
         try:

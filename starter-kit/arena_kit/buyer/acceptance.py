@@ -10,6 +10,7 @@ sheet is only taken if it keeps the must-haves, beats the alternative on pessimi
 RFQ - beats what every other live thread may still reach."""
 
 import math
+from functools import partial
 
 from ..cost import must_haves_ok
 from . import bids
@@ -165,7 +166,8 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
             if m:
                 return DecisionProposal("send", t.sid, (m,), reason="close: its price on our terms")
             return accept(t, "as good as our next bid" if c_now <= next_c + eps else "time is up")
-        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing))
+        demand = partial(space.demand, ref={**ev.standard(sid), **t.standing}, std=t.std)
+        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, their_price)
         if packages:
             return DecisionProposal("send", t.sid, tuple(packages), reason=f"bid at C {next_c:,.0f}")
     return closing(cs, ev, "nothing left to bid")

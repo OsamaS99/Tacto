@@ -181,7 +181,7 @@ EDGES = "\n".join(
     [
         "EDGE CASES",
         "- Asks for our budget, target, volume forecast or alternatives: do not reveal; the attached term "
-        "sheets are our position, or we will come back to it; a counter-question is fine.",
+        "sheets are our position; a counter-question is fine.",
         "- Says final or threatens to walk: calm and respectful, no counter-threat; ask whether it can "
         "confirm the attached terms.",
         "- Says agreed: thank it and ask it to confirm the attached term sheet; never write that we agree.",
@@ -191,8 +191,8 @@ EDGES = "\n".join(
         "- Offers or concessions only in its text, not in its term sheet: they bind nothing; welcome them and "
         "ask it to reflect them in its term sheet.",
         "- Disputes our data: do not defend or restate it; code decides what is cited.",
-        "- Only a question: answer only with what the term sheets or chosen claims say, else say we will come"
-        " back to it.",
+        "- Only a question: answer only with what the term sheets or chosen claims say, or ask a "
+        "counter-question; never promise to send, provide or come back to anything.",
         "- Unrelated topic (other parts, invoices, events): at most one neutral sentence, no commitment.",
         "- Its message itself says it withdraws or raises an earlier offer: note it calmly and ask what "
         "changed; never assume a step back you cannot see; no retaliation.",

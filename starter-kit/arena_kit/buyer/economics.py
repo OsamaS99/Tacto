@@ -11,15 +11,20 @@ from .records import CandidatePackage, EvaluatedPackage, SupplierEstimate
 SCENARIO = {"low": 0, "mid": 1, "high": 2}  # index into SupplierEstimate.full_cost; high = dearest C
 
 
-def estimate_supplier(dossier, sid, price, cash_pressure=False):
+def estimate_supplier(dossier, sid, price, cash_pressure=False, cap=None):
     """Full cost from the supplier's should-cost row, else the generic one, else 92 % of its price
-    (the should-cost error of 5-15 % sets the spread). Cash pressure raises its cost of money."""
+    (the should-cost error of 5-15 % sets the spread). Cash pressure raises its cost of money.
+    `cap`: the most its full cost can be - what its own cheapest sheet is worth to it less the
+    sustainable margin (case P02: a should-cost above the ask made the relationship term cancel
+    our price signal)."""
     found = (dossier.should_cost.get(sid) or dossier.should_cost.get("*")) if dossier else None
     if found:
         cost, conf = found
         spread, source = max(conf, 5.0) / 100, "should-cost"
     else:
         cost, spread, source = 0.92 * price, 0.07, "default"
+    if cap is not None and 0 < cap < cost:
+        cost = cap
     return SupplierEstimate(
         full_cost=(cost * (1 - spread), cost, cost * (1 + spread)),
         interest_rate=0.12 if cash_pressure else 0.08,

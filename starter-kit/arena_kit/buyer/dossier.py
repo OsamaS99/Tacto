@@ -26,7 +26,7 @@ STRENGTH = {
     "bundling": dict(fc=4, quote=4, offer=4, cost=3.5, idx=3, po=2.5, sc=2, notice=2, qn=1.5, news=1),
     "raw_material": dict(idx=5, cost=3.5, quote=3, offer=3, po=2.5, sc=2, notice=2, fc=1.5, qn=1, news=1),
     "capacity": dict(fc=4, sc=3.5, quote=3.5, offer=3.5, cost=3, news=3, idx=2.5, po=2, notice=2, qn=1.5),
-    "quality": dict(qn=5, sc=4.5, cost=2, idx=2, quote=2, offer=2, po=1.5, notice=1.5, fc=1, news=1),
+    "quality": dict(sc=5, qn=4.5, cost=2, idx=2, quote=2, offer=2, po=1.5, notice=1.5, fc=1, news=1),
 }
 
 

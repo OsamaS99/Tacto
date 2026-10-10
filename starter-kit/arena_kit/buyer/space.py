@@ -9,6 +9,8 @@ from ..cost import closing_terms, must_haves_ok
 
 MAX_COMBOS = 20_000
 EXACT = 600  # free combinations up to this are enumerated; beyond, coordinate descent
+# levers that ask more of the supplier the higher (+1) or the lower (-1) the value
+DIRECTION = {"payment_days": 1, "chargeback_eur_per_complaint": 1, "lead_time_days": -1, "ppm_commitment": -1}
 
 
 def _unique(values):
@@ -50,17 +52,21 @@ class ContractSpace:
             return None
         return [dict(zip(self.levers, combo, strict=True)) for combo in itertools.product(*values)]
 
-    def complete(self, terms, std, cost):
+    def complete(self, terms, std, cost, prefer=None):
         """A full term sheet: exactly the negotiable fields. Fields `terms` leaves out get the values
         with the lowest `cost(terms)` that keep the must-haves (exact when the combinations are few,
-        else coordinate descent); every value is snapped."""
+        else coordinate descent); every value is snapped. Among values that cost the same, the one
+        nearest the supplier's own terms (`prefer`, else its standard terms): a give that costs us nothing
+        (case P10 asked a faster delivery worth 0 to us, and paid for it in the price)."""
         out = {f: self.snap(f, terms[f], std) for f in self.levers if f in terms}
         out["unit_price"] = round(float(terms["unit_price"]), 2)
         free = [f for f in self.levers if f not in terms]
         values = [self.options(f, std) for f in free]
+        ref = {**closing_terms(self.case, {"unit_price": 0.0}, std), **(prefer or {})}
 
         def key(t):  # a must-have broken costs everything
-            return cost(t) if must_haves_ok(self.case, t, std) else math.inf
+            c = round(cost(t), 2) if must_haves_ok(self.case, t, std) else math.inf
+            return c, sum(self.demand(t, ref, std).values())
 
         if _product(values) <= EXACT:
             fills = (dict(zip(free, combo, strict=True)) for combo in itertools.product(*values))
@@ -71,6 +77,22 @@ class ContractSpace:
                 for f, opts in zip(free, values, strict=True):
                     out[f] = min(opts, key=lambda v, f=f: key({**out, f: v}))
         return {f: out[f] for f in self.negotiable}
+
+    def demand(self, terms, ref, std=None):
+        """Per lever, what `terms` asks of the supplier beyond its own terms `ref`, 0..1: how far past
+        them in the direction that costs it (longer payment, faster delivery, ...; where `ref` is
+        silent: past its easiest option); 1 for any change of a lever without a clear direction
+        (contract length, volume, a clause), 0 where `ref` is silent on it."""
+        out = {}
+        for f in self.levers:
+            v, r = terms.get(f), ref.get(f)
+            if f in DIRECTION and isinstance(v, int | float):
+                opts = [o for o in self.options(f, std) if isinstance(o, int | float)]
+                r = r if isinstance(r, int | float) else (min if DIRECTION[f] > 0 else max)(opts)
+                out[f] = max(0.0, DIRECTION[f] * (v - r)) / ((max(opts + [r]) - min(opts + [r])) or 1)
+            else:
+                out[f] = 0.0 if r is None or v == r else 1.0
+        return out
 
     def snap(self, field, value, std=None):
         opts = self.options(field, std)
