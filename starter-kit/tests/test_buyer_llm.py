@@ -103,17 +103,42 @@ def test_writer_assembles_the_chosen_portfolio_verbatim_and_keeps_rationale_priv
     assert "budget" not in msg.body
 
 
-def test_opening_selection_keeps_all_packages_and_one_claim():
+def test_opening_selection_is_normalized_to_all_packages_and_one_claim():
     pkt = replace(PKT, rev=5, first_contact=True)
     call, _ = replies(turn(package_ids=("P1",), claim_ids=()))
     msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
-    assert source == "template" and msg.term_sheets == SHEETS and msg.refs == CLAIM.ids
+    assert source == "llm_normalized"
+    assert msg.term_sheets == SHEETS and msg.refs == CLAIM.ids
 
 
-def test_later_open_selection_keeps_at_least_two_packages():
+def test_later_open_selection_is_normalized_to_two_packages():
     call, _ = replies(turn(package_ids=("P1",)))
     msg, source, _ = writer.write_turn(Model([("m", call)]), replace(PKT, rev=3), 10.0)
-    assert source == "template" and msg.term_sheets == SHEETS
+    assert source == "llm_normalized" and msg.term_sheets == SHEETS
+
+
+def test_later_single_matched_branch_remains_a_clean_model_selection():
+    pkt = replace(PKT, packages=(SHEETS[0],), first_contact=False)
+    call, _ = replies(turn(package_ids=("P1",)))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
+    assert source == "llm" and msg.term_sheets == (SHEETS[0],)
+
+
+@pytest.mark.parametrize("bad", [{"package_ids": ("P9",)}, {"claim_ids": ("C7",)}])
+def test_normalization_never_repairs_unknown_ids(bad):
+    call, _ = replies(turn(**bad))
+    pkt = replace(PKT, first_contact=True)
+    msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
+    assert source == "template" and msg == writer.template(pkt)
+
+
+def test_normalization_clears_a_trade_missing_from_an_appended_package():
+    sheets = (SHEETS[0], {"unit_price": 205.0, "contract_months": 24})
+    pkt = replace(PKT, packages=sheets, trades=("payment_days",), first_contact=True)
+    call, _ = replies(turn(package_ids=("P1",), trade="payment_days"))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), pkt, 10.0)
+    assert source == "llm_normalized" and msg.term_sheets == sheets
+    assert "payment terms shown" not in msg.body
 
 
 def test_revision_one_is_not_first_contact_after_a_buyer_message():
@@ -273,6 +298,21 @@ def test_replay_summarises_without_a_model(tmp_path):
     assert {f["category"] for f in out["failures"]} == {"execution"}
     assert out["summary"]["no_deal"] == 1  # choosing a better alternative need not be a policy failure
     assert ROLES["replay_analyst"].check({k: out[k] for k in ROLES["replay_analyst"].schema["required"]}) == []
+
+
+def test_replay_counts_normalized_writer_output(tmp_path):
+    lines = [
+        {"kind": "send", "writer": "llm"},
+        {"kind": "send", "writer": "llm_normalized"},
+        {"kind": "send", "writer": "template"},
+    ]
+    (tmp_path / "writer.events.jsonl").write_text("\n".join(map(json.dumps, lines)))
+    events, sessions = replay.load([tmp_path])
+    assert replay.summarize(events, sessions)["writer"] == {
+        "llm": 1,
+        "llm_normalized": 1,
+        "template": 1,
+    }
 
 
 def test_concurrency_is_capped(monkeypatch):

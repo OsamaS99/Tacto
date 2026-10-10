@@ -123,6 +123,32 @@ def write(model, pkt, budget_s, case_id="", focus=""):
     return write_turn(model, pkt, budget_s, case_id, focus)[0]
 
 
+def normalize_turn(out, packages, claims, pkt):
+    """Fill safe open-turn omissions from approved menus; never repair unknown or malformed IDs."""
+    if out is None or TURN.check(out):
+        return out, False
+    if any(i not in packages for i in out["package_ids"]) or any(i not in claims for i in out["claim_ids"]):
+        return out, False
+    normalized = {
+        **out,
+        "package_ids": list(out["package_ids"]),
+        "claim_ids": list(out["claim_ids"]),
+    }
+    if pkt.status == "open":
+        required = len(packages) if pkt.first_contact else min(2, len(packages))
+        for package_id in packages:
+            if len(normalized["package_ids"]) >= required:
+                break
+            if package_id not in normalized["package_ids"]:
+                normalized["package_ids"].append(package_id)
+        if pkt.first_contact and claims and not normalized["claim_ids"]:
+            normalized["claim_ids"].append(next(iter(claims)))
+        trade = normalized["trade"]
+        if trade and any(trade not in packages[i] for i in normalized["package_ids"]):
+            normalized["trade"] = None
+    return normalized, normalized != out
+
+
 def write_turn(model, pkt, budget_s, case_id="", focus="", *, deadline=None, observation=None):
     end = min(time.monotonic() + max(0, budget_s), deadline if deadline is not None else float("inf"))
     packages = {f"P{i}": s for i, s in enumerate(pkt.packages, 1)}
@@ -145,18 +171,24 @@ def write_turn(model, pkt, budget_s, case_id="", focus="", *, deadline=None, obs
         observation=json.dumps(observation or {}),
         their_last=pkt.their_last or "(none)",
     )
+
+    def validate(raw):
+        selected, _ = normalize_turn(parse_json(raw), packages, claims, pkt)
+        return turn_errors(selected, packages, claims, pkt=pkt)
+
     raw = model.complete(
         system,
         user,
         end - time.monotonic(),
         role="communication",
         deadline=end,
-        validate=lambda text: turn_errors(parse_json(text), packages, claims, pkt=pkt),
+        validate=validate,
     )
-    out = parse_json(raw)
-    if out is None:
+    out, normalized = normalize_turn(parse_json(raw), packages, claims, pkt)
+    if out is None or turn_errors(out, packages, claims, pkt=pkt):
         return template(pkt), "template", None
-    return assemble(pkt, out, packages, claims), "llm", {"rationale": out["rationale"]}
+    source = "llm_normalized" if normalized else "llm"
+    return assemble(pkt, out, packages, claims), source, {"rationale": out["rationale"]}
 
 
 def turn_errors(out, packages, claims, allowed_numbers=None, *, pkt=None):
