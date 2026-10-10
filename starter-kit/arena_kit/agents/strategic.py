@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from ..cost import OPS, RELATIONSHIP_GOALS, closing_terms, complete_offer, must_haves_ok, total_cost
 from ..docs import standard_terms
-from ..play import latest, live_threads, moves_left, standing
+from ..play import latest, live_threads, moves_left
 from .llm import ID_RE, parse
 
 log = logging.getLogger("arena")
@@ -119,24 +119,27 @@ class StrategicAgent:
         offers = []
         for supplier_id in live_threads(threads):
             events = threads[supplier_id]
-            offer_id, terms = standing(events)
+            supplier_message = latest(events)
+            sheets = supplier_message.get("term_sheets") or [{}]
             standard = standard_terms(events)
             supplier = self._supplier_estimate(case, supplier_id, standard)
-            cost = total_cost(case, terms, standard, supplier) if offer_id else math.inf
-            offers.append(
-                EvaluatedOffer(
-                    supplier_id=supplier_id,
-                    offer_id=offer_id,
-                    terms=terms,
-                    standard=standard,
-                    supplier=supplier,
-                    total_cost=cost,
-                    valid=(bool(offer_id) and math.isfinite(cost) and must_haves_ok(case, terms, standard)),
-                    status=latest(events).get("status", "open"),
-                    moves_left=moves_left(case, events),
-                    contacted=any(message.get("from") == "buyer" for message in events),
+            for sheet in sheets:
+                offer_id, terms = sheet.get("term_sheet_id"), sheet.get("terms") or {}
+                cost = total_cost(case, terms, standard, supplier) if offer_id else math.inf
+                offers.append(
+                    EvaluatedOffer(
+                        supplier_id=supplier_id,
+                        offer_id=offer_id,
+                        terms=terms,
+                        standard=standard,
+                        supplier=supplier,
+                        total_cost=cost,
+                        valid=(bool(offer_id) and math.isfinite(cost) and must_haves_ok(case, terms, standard)),
+                        status=supplier_message.get("status", "open"),
+                        moves_left=moves_left(case, events),
+                        contacted=any(message.get("from") == "buyer" for message in events),
+                    )
                 )
-            )
         return sorted(offers, key=lambda offer: (not offer.valid, offer.total_cost, offer.supplier_id))
 
     def _supplier_estimate(self, case, supplier_id, standard):
@@ -173,6 +176,7 @@ class StrategicAgent:
                     )
             if row is None or not row.get("unit_cost"):
                 return None
+            confidence = float(row.get("confidence_pct") or 0) / 100
             interest_rate = max(0.08, case["buyer"].get("interest_rate", 0.08))
             if self.package is not None:
                 intel = self.package.query(
@@ -191,9 +195,9 @@ class StrategicAgent:
                 {},
             )
             estimate = {
-                # The estimate is explicitly a full cost without margin. Its confidence
-                # range is uncertainty, not evidence that the lower edge is more likely.
-                "full_cost": float(row["unit_cost"]),
+                # Blend the nominal estimate with its lower confidence edge. This still
+                # protects supplier health without treating an uncertain point as exact.
+                "full_cost": float(row["unit_cost"]) * (1 - confidence / 2),
                 "interest_rate": interest_rate,
                 "standard": closing_terms(case, {}, standard),
             }
@@ -240,17 +244,32 @@ class StrategicAgent:
             previous_cost = max(
                 total_cost(case, sheet["terms"], offer.standard, offer.supplier) for sheet in last_buyer["term_sheets"]
             )
-            supplier_costs = [
-                total_cost(case, sheet["terms"], offer.standard, offer.supplier)
-                for message in events
-                if message.get("from") != "buyer"
-                for sheet in (message.get("term_sheets") or [])[:1]
-                if sheet.get("terms", {}).get("unit_price") is not None
-            ]
-            supplier_moved = len(supplier_costs) < 2 or supplier_costs[-1] < supplier_costs[-2] - 0.01
-            # A small move on a hold preserves reciprocity without giving away half the gap.
-            fraction = self.concession if supplier_moved else self.hold_concession
-            target_cost = previous_cost + fraction * max(0.0, offer.total_cost - previous_cost)
+            supplier_costs = []
+            for message in events:
+                if message.get("from") == "buyer":
+                    continue
+                round_costs = [
+                    total_cost(case, sheet["terms"], offer.standard, offer.supplier)
+                    for sheet in message.get("term_sheets") or []
+                    if sheet.get("terms", {}).get("unit_price") is not None
+                ]
+                if round_costs:
+                    supplier_costs.append(min(round_costs))
+            gap = max(0.0, offer.total_cost - previous_cost)
+            improvement = max(0.0, supplier_costs[-2] - supplier_costs[-1]) if len(supplier_costs) >= 2 else 0.0
+            if improvement <= 0 or gap <= 0:
+                fraction = self.hold_concession
+            else:
+                movement_ratio = improvement / gap
+                maximum = min(0.40, max(self.concession, self.concession * 2))
+                fraction = min(
+                    maximum,
+                    max(
+                        self.hold_concession,
+                        self.concession * (0.5 + 2 * movement_ratio),
+                    ),
+                )
+            target_cost = previous_cost + fraction * gap
 
         alternative_cost = self._alternative_cost(case)
         target_cost = min(target_cost, alternative_cost)
@@ -315,10 +334,38 @@ class StrategicAgent:
         candidates.sort(key=lambda item: tuple(str(item[1].get(field)) for field in fields))
         if len(candidates) <= self.max_sheets:
             return [terms for _, terms in candidates]
+        prefer_supplier_signature = last_buyer is not None or offer.terms.get("index_clause") is not None
         if self.max_sheets == 1:
-            return [candidates[len(candidates) // 2][1]]
+            preferred = (
+                next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if all(candidate[1].get(field) == offer.terms.get(field) for field in fields)
+                    ),
+                    candidates[len(candidates) // 2],
+                )
+                if prefer_supplier_signature
+                else candidates[len(candidates) // 2]
+            )
+            return [preferred[1]]
         indexes = [round(i * (len(candidates) - 1) / (self.max_sheets - 1)) for i in range(self.max_sheets)]
-        return [candidates[index][1] for index in dict.fromkeys(indexes)]
+        selected = [candidates[index] for index in dict.fromkeys(indexes)]
+        preferred = (
+            next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if all(candidate[1].get(field) == offer.terms.get(field) for field in fields)
+                ),
+                None,
+            )
+            if prefer_supplier_signature
+            else None
+        )
+        if preferred is not None and preferred not in selected:
+            selected[-1] = preferred
+        return [terms for _, terms in selected]
 
     def _best_reference_terms(self, case, offer, target_price):
         """Choose the cheapest complete package at the target price as the anchor."""
@@ -363,6 +410,15 @@ class StrategicAgent:
             covering = [value for value in options if value >= case["buyer"]["need_per_year"]]
             if covering:
                 options = covering
+        elif field == "index_clause" and None in options and case.get("type") != "raw_material":
+            paths = case["buyer"].get("index_paths", {})
+            buyer_favourable = [
+                value
+                for value in options
+                if value is None or (isinstance(value, dict) and paths.get(value.get("series"), 0) < 0)
+            ]
+            if buyer_favourable:
+                options = buyer_favourable
         constraints = [constraint for constraint in case["buyer"].get("must_haves", []) if constraint["field"] == field]
         if constraints:
             options = [value for value in options if all(OPS[item["op"]](value, item["value"]) for item in constraints)]
@@ -372,6 +428,10 @@ class StrategicAgent:
         """Return a category-aware first-round discount from the chosen benchmark."""
         goal = case["buyer"].get("category_goal")
         anchor = self.anchor
+        if goal in RELATIONSHIP_GOALS:
+            return min(anchor, 0.02)
+        if case.get("type") == "raw_material" and goal == "leverage":
+            return min(anchor, 0.06)
         if goal == "leverage":
             anchor = max(anchor, 0.12)
         elif goal == "quality_first":
@@ -471,22 +531,25 @@ class StrategicAgent:
             if fact is None and self.package is not None:
                 fact = self.package.lookup(ref)
             if fact is not None:
-                evidence[ref] = fact
+                evidence[ref] = dict(fact)
+                if ref.startswith("ctr:") and self.package is not None and hasattr(self.package, "document"):
+                    try:
+                        evidence[ref]["_document"] = self.package.document(ref)
+                    except (FileNotFoundError, KeyError, TypeError, ValueError):
+                        pass
         if self.package is not None:
             try:
                 for part_id in case.get("parts", []):
-                    for supplier_id in case.get("suppliers", []):
-                        rows = self.package.query(
-                            "SELECT id, order_date FROM po_lines "
-                            "WHERE part_id = ? AND supplier_id = ? "
-                            "ORDER BY order_date DESC LIMIT 8",
-                            (part_id, supplier_id),
-                        )
-                        for row in rows:
-                            ref = row["id"]
-                            fact = self.package.lookup(ref)
-                            if fact is not None:
-                                evidence[ref] = fact
+                    rows = self.package.query(
+                        "SELECT id, supplier_id, order_date FROM po_lines "
+                        "WHERE part_id = ? ORDER BY order_date DESC LIMIT 24",
+                        (part_id,),
+                    )
+                    for row in rows:
+                        ref = row["id"]
+                        fact = self.package.lookup(ref)
+                        if fact is not None:
+                            evidence[ref] = fact
                     forecasts = self.package.query(
                         "SELECT id FROM forecasts WHERE part_id = ? ORDER BY snapshot_month DESC LIMIT 1",
                         (part_id,),
@@ -531,6 +594,7 @@ class StrategicAgent:
                 {
                     "supplier_id": document.get("supplier"),
                     "refs": [document_ref, contract_ref],
+                    "priority": 100,
                     "body": (
                         f"The announced change provides {document['days']} days of notice, below "
                         f"the {contract_fact['days']} days required by our contract "
@@ -538,7 +602,8 @@ class StrategicAgent:
                     ),
                 }
             )
-        arguments.extend(self._purchase_price_arguments())
+        arguments.extend(self._contract_index_arguments(case))
+        arguments.extend(self._purchase_price_arguments(case))
         arguments.extend(self._forecast_arguments())
         arguments.extend(self._falling_index_arguments(case))
         for ref, fact in self.evidence.items():
@@ -548,7 +613,37 @@ class StrategicAgent:
                 {
                     "supplier_id": fact.get("supplier"),
                     "refs": [ref],
+                    "priority": 20,
                     "body": (f"The supplier scorecard records {fact['otd_pct']:.1f}% on-time delivery ({ref})."),
+                }
+            )
+        return arguments
+
+    def _contract_index_arguments(self, case):
+        """Cite the existing index basis when a raw-material case proposes another series."""
+        if case.get("type") != "raw_material":
+            return []
+        proposed = {
+            clause.get("series")
+            for clause in case.get("term_options", {}).get("index_clause", [])
+            if isinstance(clause, dict) and clause.get("series")
+        }
+        arguments = []
+        for ref, fact in self.evidence.items():
+            if not ref.startswith("ctr:") or not fact.get("_document"):
+                continue
+            match = re.search(r"\bindex\s+([A-Z][A-Z0-9-]+)", fact["_document"], re.IGNORECASE)
+            if match is None:
+                continue
+            series = match.group(1)
+            if not proposed or proposed == {series}:
+                continue
+            arguments.append(
+                {
+                    "supplier_id": fact.get("supplier"),
+                    "refs": [ref],
+                    "priority": 95,
+                    "body": f"Our current agreement indexes this price to {series} ({ref}).",
                 }
             )
         return arguments
@@ -573,6 +668,7 @@ class StrategicAgent:
                 {
                     "supplier_id": None,
                     "refs": [ref],
+                    "priority": 80,
                     "body": (
                         f"The latest demand forecast for {fact.get('part', 'this part')} "
                         f"shows volume growth of {change:+.1f}% ({ref})."
@@ -581,8 +677,8 @@ class StrategicAgent:
             )
         return arguments
 
-    def _purchase_price_arguments(self):
-        """Build claims from the two latest comparable POs for each supplier and part."""
+    def _purchase_price_arguments(self, case):
+        """Build claims from recent same-part purchase orders."""
         groups = {}
         for ref, fact in self.evidence.items():
             if not ref.startswith("po:") or fact.get("unit_price") is None:
@@ -602,6 +698,7 @@ class StrategicAgent:
                 {
                     "supplier_id": supplier_id,
                     "refs": [first[0], second[0]],
+                    "priority": 40,
                     "body": (
                         f"Our two latest purchase orders for {part_id} were priced at "
                         f"{first[1]['unit_price']:.2f} and {second[1]['unit_price']:.2f} EUR "
@@ -609,6 +706,38 @@ class StrategicAgent:
                     ),
                 }
             )
+        for supplier_id in case.get("suppliers", []):
+            for part_id in case.get("parts", []):
+                target = sorted(
+                    groups.get((supplier_id, part_id), []),
+                    key=lambda item: item[1].get("date", ""),
+                    reverse=True,
+                )
+                if not target:
+                    continue
+                target_price = target[0][1]["unit_price"] / target[0][1].get("price_unit", 1)
+                competitors = []
+                for (other_supplier, other_part), rows in groups.items():
+                    if other_supplier == supplier_id or other_part != part_id:
+                        continue
+                    latest_row = max(rows, key=lambda item: item[1].get("date", ""))
+                    price = latest_row[1]["unit_price"] / latest_row[1].get("price_unit", 1)
+                    if price < target_price:
+                        competitors.append((price, other_supplier, latest_row))
+                if not competitors:
+                    continue
+                _, other_supplier, (ref, fact) = min(competitors)
+                arguments.append(
+                    {
+                        "supplier_id": supplier_id,
+                        "refs": [ref],
+                        "priority": 90,
+                        "body": (
+                            f"A recent comparable order for {part_id} from {other_supplier} was priced at "
+                            f"{fact['unit_price']:.2f} EUR per {fact.get('price_unit', 1)} unit(s) ({ref})."
+                        ),
+                    }
+                )
         return arguments
 
     def _falling_index_arguments(self, case):
@@ -661,6 +790,7 @@ class StrategicAgent:
                         {
                             "supplier_id": None,
                             "refs": [earlier["id"], latest["id"]],
+                            "priority": 70,
                             "body": (
                                 f"The {series_id} cost index changed {change:+.1f}% from "
                                 f"{earlier['month']} to {latest['month']} "
@@ -673,8 +803,8 @@ class StrategicAgent:
             log.warning("cost-index evidence unavailable (%s)", error)
         return sorted(arguments, key=lambda argument: argument["impact"])
 
-    def _select_argument(self, supplier_id, threads):
-        """Select one relevant evidence claim, preserving other claims for later rounds."""
+    def _select_arguments(self, supplier_id, threads):
+        """Use the strongest new claims while respecting the arena's three-reference budget."""
         used_refs = {
             ref
             for events in threads.values()
@@ -682,19 +812,24 @@ class StrategicAgent:
             if message.get("from") == "buyer"
             for ref in [*(message.get("refs") or []), *ID_RE.findall(message.get("body", ""))]
         }
-        return next(
-            (
-                argument
-                for argument in self.arguments
-                if argument["supplier_id"] in (None, supplier_id)
-                and not any(ref in used_refs for ref in argument["refs"])
-            ),
-            None,
-        )
+        first_contact = not any(message.get("from") == "buyer" for message in threads.get(supplier_id, []))
+        selected = []
+        selected_refs = set()
+        for argument in sorted(self.arguments, key=lambda item: item.get("priority", 0), reverse=True):
+            refs = set(argument["refs"])
+            if argument["supplier_id"] not in (None, supplier_id) or refs & used_refs:
+                continue
+            if len(selected_refs | refs) > 3:
+                continue
+            selected.append(argument)
+            selected_refs.update(refs)
+            if not first_contact or len(selected_refs) == 3:
+                break
+        return selected
 
     def _write_email(self, case, offer, packages, threads):
         """Let the LLM write copy only; deterministic copy is always available."""
-        argument = self._select_argument(offer.supplier_id, threads)
+        arguments = self._select_arguments(offer.supplier_id, threads)
         fallback = {
             "subject": case["title"],
             "body": "Thank you for your proposal. Please review the alternative commercial packages below.",
@@ -711,7 +846,7 @@ class StrategicAgent:
                 "supplier_status": offer.status,
                 "standing_offer": offer.terms,
                 "packages": packages,
-                "evidence_argument": argument["body"] if argument else None,
+                "evidence_argument": "\n".join(argument["body"] for argument in arguments) or None,
             }
             try:
                 written = parse(self.complete(WRITER_SYSTEM, json.dumps(request, ensure_ascii=False, default=str)))
@@ -722,15 +857,18 @@ class StrategicAgent:
             except Exception as error:
                 log.warning("LLM writer failed (%s) - using deterministic copy", error)
 
-        if argument:
+        if arguments:
             # Drop conflicting paraphrases that cite the same evidence before adding truth.
             sentences = re.split(r"(?<=[.!?])\s+|\n+", fallback["body"])
             fallback["body"] = " ".join(
-                sentence for sentence in sentences if not any(ref in sentence for ref in argument["refs"])
+                sentence
+                for sentence in sentences
+                if not any(ref in sentence for argument in arguments for ref in argument["refs"])
             ).strip()
             if not fallback["body"]:
                 fallback["body"] = "Thank you for your proposal."
-            fallback["body"] = f"{fallback['body'].rstrip()}\n\n{argument['body']}"
+            evidence_text = "\n".join(argument["body"] for argument in arguments)
+            fallback["body"] = f"{fallback['body'].rstrip()}\n\n{evidence_text}"
 
         known_offers = {offer.offer_id} if offer.offer_id else set()
 

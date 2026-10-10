@@ -235,7 +235,7 @@ def test_strategic_agent_keeps_a_material_opening_anchor_with_supplier_health():
     message = StrategicAgent().decide(case, {"sup:A": [supplier_message("A", 40.0, payment=60)]})["message"]
 
     assert message["term_sheets"]
-    assert all(sheet["terms"]["unit_price"] <= 38.40 for sheet in message["term_sheets"])
+    assert all(sheet["terms"]["unit_price"] <= 39.60 for sheet in message["term_sheets"])
 
 
 def test_strategic_agent_does_not_mix_uncapped_and_anchored_opening_packages():
@@ -273,7 +273,7 @@ def test_strategic_agent_does_not_mix_uncapped_and_anchored_opening_packages():
     )["message"]
 
     assert message["term_sheets"]
-    assert all(sheet["terms"]["unit_price"] <= 38.40 for sheet in message["term_sheets"])
+    assert all(sheet["terms"]["unit_price"] <= 39.60 for sheet in message["term_sheets"])
 
 
 def test_strategic_agent_uses_case_supplied_should_cost_without_a_data_package():
@@ -344,7 +344,7 @@ def test_strategic_agent_does_not_reuse_ambiguous_should_cost_across_suppliers()
     assert all(offer.supplier is None for offer in offers)
 
 
-def test_strategic_agent_uses_nominal_should_cost_for_supplier_health():
+def test_strategic_agent_uses_the_midpoint_to_the_lower_should_cost_bound():
     class Package:
         def lookup(self, ref):
             return None
@@ -377,7 +377,7 @@ def test_strategic_agent_uses_nominal_should_cost_for_supplier_health():
         {"sup:A": [supplier_message("A", 44.0, payment=60)]},
     )[0]
 
-    assert offer.supplier["full_cost"] == 40.0
+    assert offer.supplier["full_cost"] == 38.0
 
 
 def test_strategic_agent_estimates_supplier_health_when_standard_payment_is_missing():
@@ -454,6 +454,56 @@ def test_strategic_agent_generates_complete_diverse_packages():
     assert all(set(sheet) == set(CASE["negotiable"]) for sheet in sheets)
     assert len({sheet["payment_days"] for sheet in sheets}) == len(sheets)
     assert all(sheet["unit_price"] < 44.0 for sheet in sheets)
+
+
+def test_strategic_agent_keeps_the_best_payment_extreme_on_a_plain_opening():
+    message = StrategicAgent().decide(
+        CASE,
+        {"sup:A": [supplier_message("A", 44.0, payment=30)]},
+    )["message"]
+
+    assert 90 in {sheet["terms"]["payment_days"] for sheet in message["term_sheets"]}
+
+
+def test_strategic_agent_tests_a_compensated_supplier_preferred_index_package():
+    clause = {
+        "series": "METAL",
+        "material_share": 0.45,
+        "deadband_pct": 3,
+        "base_month": "2026-08",
+    }
+    case = {
+        **CASE,
+        "type": "raw_material",
+        "negotiable": ["unit_price", "index_clause", "payment_days"],
+        "fixed_terms": {key: value for key, value in CASE["fixed_terms"].items() if key != "index_clause"},
+        "term_options": {
+            "index_clause": [None, clause],
+            "payment_days": [14, 60, 90],
+        },
+        "buyer": {
+            **CASE["buyer"],
+            "index_paths": {"METAL": 0.06},
+        },
+    }
+
+    opening = supplier_message("A", 44.0, payment=14)
+    opening["term_sheets"][0]["terms"]["index_clause"] = clause
+
+    sheets = StrategicAgent().decide(case, {"sup:A": [opening]})["message"]["term_sheets"]
+
+    assert sheets
+    assert any(sheet["terms"]["index_clause"] is None for sheet in sheets)
+    assert any(sheet["terms"]["index_clause"] == clause and sheet["terms"]["payment_days"] == 14 for sheet in sheets)
+
+
+def test_strategic_agent_uses_cautious_anchors_for_relationship_and_raw_material_cases():
+    agent = StrategicAgent()
+    stabilise = {**CASE, "buyer": {**CASE["buyer"], "category_goal": "stabilise"}}
+    raw_material = {**CASE, "type": "raw_material"}
+
+    assert agent._opening_anchor(stabilise) == 0.02
+    assert agent._opening_anchor(raw_material) == 0.06
 
 
 def test_strategic_agent_anchors_leverage_packages_below_the_current_price():
@@ -533,7 +583,7 @@ def test_strategic_agent_anchors_from_a_package_that_covers_the_need_and_horizon
     message = StrategicAgent(package=Package()).decide(case, {"sup:A": [opening]})["message"]
 
     assert message["term_sheets"]
-    assert all(sheet["terms"]["unit_price"] <= 92.0 for sheet in message["term_sheets"])
+    assert all(sheet["terms"]["unit_price"] <= 99.0 for sheet in message["term_sheets"])
     assert all(sheet["terms"]["volume_per_year"] >= 1_000 for sheet in message["term_sheets"])
     assert all(sheet["terms"]["contract_months"] >= 24 for sheet in message["term_sheets"])
 
@@ -564,6 +614,49 @@ def test_strategic_agent_never_moves_its_counteroffer_backward():
     shared_options = second_prices.keys() & third_prices.keys()
     assert shared_options
     assert all(third_prices[option] >= second_prices[option] for option in shared_options)
+
+
+def test_strategic_agent_rewards_a_larger_supplier_move_with_a_larger_concession():
+    def next_counter(previous_supplier_price):
+        events = [supplier_message("A", previous_supplier_price, payment=30)]
+        events.append(
+            {
+                "from": "buyer",
+                "term_sheets": [{"terms": {"unit_price": 35.0, "payment_days": 60}}],
+            }
+        )
+        events.append(supplier_message("A", 43.0, payment=30))
+        message = StrategicAgent().decide(CASE, {"sup:A": events})["message"]
+        return max(sheet["terms"]["unit_price"] for sheet in message["term_sheets"])
+
+    small_move = next_counter(44.0)
+    large_move = next_counter(50.0)
+
+    assert large_move > small_move
+
+
+def test_strategic_agent_measures_supplier_movement_from_its_best_alternative():
+    def next_counter(current_message):
+        events = [supplier_message("A", 44.0, payment=30)]
+        events.append(
+            {
+                "from": "buyer",
+                "term_sheets": [{"terms": {"unit_price": 35.0, "payment_days": 60}}],
+            }
+        )
+        events.append(current_message)
+        return StrategicAgent().decide(CASE, {"sup:A": events})["message"]["term_sheets"]
+
+    direct = supplier_message("A", 43.0, payment=60)
+    alternative = supplier_message("A", 43.5, payment=30)
+    alternative["term_sheets"].append(
+        {
+            "term_sheet_id": "offer:A-0-a",
+            "terms": {"unit_price": 43.0, "payment_days": 60},
+        }
+    )
+
+    assert next_counter(alternative) == next_counter(direct)
 
 
 def test_strategic_agent_does_not_repeat_packages_when_the_supplier_holds():
@@ -625,6 +718,20 @@ def test_strategic_agent_accepts_only_a_valid_final_offer_that_beats_the_alterna
 
     assert rejected == {"type": "walk_away"}
     assert accepted == {"type": "accept", "term_sheet_id": "offer:A-0"}
+
+
+def test_strategic_agent_accepts_the_cheapest_final_alternative():
+    final = supplier_message("A", 44.0, payment=14, status="final_offer")
+    final["term_sheets"].append(
+        {
+            "term_sheet_id": "offer:A-0-a",
+            "terms": {"unit_price": 42.0, "payment_days": 60},
+        }
+    )
+
+    action = StrategicAgent().decide(CASE, {"sup:A": [final]})["message"]["action"]
+
+    assert action == {"type": "accept", "term_sheet_id": "offer:A-0-a"}
 
 
 def test_strategic_agent_never_accepts_an_unpriced_final_offer():
@@ -839,6 +946,88 @@ def test_strategic_agent_discovers_recent_purchase_prices_for_the_supplier():
 
     assert "39.00" in message["body"]
     assert message["refs"] == ["po:RECENT", "po:PREVIOUS"]
+
+
+def test_strategic_agent_opens_with_the_three_strongest_raw_material_facts():
+    clause = {
+        "series": "AS-14404",
+        "material_share": 0.45,
+        "deadband_pct": 3,
+        "base_month": "2026-08",
+    }
+    case = {
+        **CASE,
+        "type": "raw_material",
+        "suppliers": ["sup:A"],
+        "negotiable": ["unit_price", "index_clause", "payment_days"],
+        "fixed_terms": {key: value for key, value in CASE["fixed_terms"].items() if key != "index_clause"},
+        "term_options": {
+            "index_clause": [None, clause],
+            "payment_days": [14, 60, 90],
+        },
+        "buyer": {
+            **CASE["buyer"],
+            "index_paths": {"AS-14404": 0.06},
+        },
+        "refs": ["ctr:AGREEMENT"],
+        "facts": {"ctr:AGREEMENT": {"supplier": "sup:A", "days": 60}},
+    }
+
+    class Package:
+        facts = {
+            "po:TARGET": {
+                "supplier": "sup:A",
+                "part": "part:T1",
+                "date": "2026-09-18",
+                "unit_price": 5.84,
+                "price_unit": 1,
+            },
+            "po:COMPETITOR": {
+                "supplier": "sup:B",
+                "part": "part:T1",
+                "date": "2026-09-24",
+                "unit_price": 5.45,
+                "price_unit": 1,
+            },
+            "fc:T1@2026-09": {
+                "part": "part:T1",
+                "snapshot_month": "2026-09",
+                "change_pct": 11.9,
+                "volume_per_year": 1_119,
+            },
+        }
+
+        def lookup(self, ref):
+            return self.facts.get(ref)
+
+        def document(self, ref):
+            assert ref == "ctr:AGREEMENT"
+            return "The price follows index PPI-C2431 with an 80% material share."
+
+        def query(self, sql, params=()):
+            if "FROM po_lines" in sql:
+                rows = [
+                    {"id": "po:COMPETITOR", "supplier_id": "sup:B", "order_date": "2026-09-24"},
+                    {"id": "po:TARGET", "supplier_id": "sup:A", "order_date": "2026-09-18"},
+                ]
+                return [row for row in rows if len(params) == 1 or row["supplier_id"] == params[1]]
+            if "FROM forecasts" in sql:
+                return [{"id": "fc:T1@2026-09"}]
+            return []
+
+    message = StrategicAgent(package=Package()).decide(
+        case,
+        {"sup:A": [supplier_message("A", 6.10)]},
+    )["message"]
+
+    assert message["refs"] == [
+        "ctr:AGREEMENT",
+        "po:COMPETITOR",
+        "fc:T1@2026-09",
+    ]
+    assert "PPI-C2431" in message["body"]
+    assert "5.45" in message["body"]
+    assert "+11.9%" in message["body"]
 
 
 def test_strategic_agent_discovers_volume_growth_from_the_latest_forecast():
