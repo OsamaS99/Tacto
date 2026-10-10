@@ -1,0 +1,87 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4KB6YWG9X4AGMWP26WJPKZP",
+  "session_id": "85659574-f9ad-4761-bdf5-07c4c69e9023",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-10T16:44:21.065742Z",
+  "branch": "buyer-agent",
+  "checkpoints_count": 2,
+  "save_step_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-5-5",
+  "turn_id": "d7bda8b6f607",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 790,
+    "cache_creation_tokens": 1138473,
+    "cache_read_tokens": 74932411,
+    "output_tokens": 341888,
+    "api_call_count": 389
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-init-2026-10-10T10:21:44.156966Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "init"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "84947dc3e909",
+      "timestamp": "2026-10-10T10:21:44.156966Z",
+      "native": {
+        "command": "/init"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/init",
+        "default_collapsed": true
+      }
+    },
+    {
+      "id": "prompt-skill-claude-code-code-review-2026-10-10T16:24:58.321234Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "code-review"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "e727647b06ba",
+      "timestamp": "2026-10-10T16:24:58.321234Z",
+      "native": {
+        "command": "/code-review"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/code-review",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 59
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 1,
+      "user_lines_removed": 1,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/buyer/bids.py": 1
+      },
+      "user_removed_per_file": {
+        "starter-kit/arena_kit/buyer/bids.py": 1
+      }
+    }
+  ]
+}
