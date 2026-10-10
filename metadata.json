@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4K46ZBZEXK5A9TBGJA1JV5R",
+  "strategy": "manual-commit",
+  "branch": "buyer-agent",
+  "checkpoints_count": 10,
+  "files_touched": [
+    "starter-kit/arena_kit/buyer/acceptance.py",
+    "starter-kit/arena_kit/buyer/agent.py",
+    "starter-kit/arena_kit/buyer/bids.py",
+    "starter-kit/arena_kit/buyer/dossier.py",
+    "starter-kit/arena_kit/buyer/economics.py",
+    "starter-kit/arena_kit/buyer/guard.py",
+    "starter-kit/arena_kit/buyer/prompts.py",
+    "starter-kit/arena_kit/buyer/space.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 34358,
+    "cache_read_tokens": 11573165,
+    "output_tokens": 17360,
+    "api_call_count": 29
+  }
+}
