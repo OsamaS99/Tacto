@@ -280,16 +280,15 @@ def test_reduced_reservation_overrides_previous_bid(hold, regressed):
     assert bids.next_bid(playbook(CASE), t, a, 190_000, 200_000, 250_000, 0.8, hold) <= 200_000
 
 
-def test_supplier_specific_evidence_selects_high_scenario_consistently():
+def test_every_decision_uses_the_mid_scenario_whatever_the_evidence():
     case = with_buyer(category_goal="stabilise", sustainable_margin_pct=8, relationship_eur_per_point=5000)
     dossier = EvidenceDossier(case["case_id"], should_cost={"sup:A": (95.0, 10.0), "*": (90.0, 15.0)})
     specific = estimate_supplier(dossier, "sup:A", 110.0, cap=10.0)
     generic = estimate_supplier(dossier, "sup:B", 110.0)
     assert specific.full_cost[1] == 95.0  # a quote-based cap cannot overwrite dated cost evidence
     ev = evaluator(case, sids=("sup:A", "sup:B"), estimates={"sup:A": specific, "sup:B": generic})
-    assert ev.risk_scenario("sup:A") == "high" and ev.risk_scenario("sup:B") == "mid"
     terms = {"unit_price": 100.0, "payment_days": 60, "contract_months": 24, "incoterm": "DAP"}
-    assert ev.evaluate(CandidatePackage("sup:A", terms, "test")).c == ev.c("sup:A", terms, "high")
+    assert ev.evaluate(CandidatePackage("sup:A", terms, "test")).c == ev.c("sup:A", terms, "mid")
     assert ev.c("sup:B", terms) == ev.c("sup:B", terms, "mid")
 
 

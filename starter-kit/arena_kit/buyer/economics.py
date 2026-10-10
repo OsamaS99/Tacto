@@ -46,17 +46,12 @@ class EconomicEvaluator:
         """The supplier's standard terms, completed from the case, as `cost.supplier_value` reads them."""
         return closing_terms(self.case, {"unit_price": 0.0}, self.std.get(sid))
 
-    def risk_scenario(self, sid):
-        """Use the upper cost bound for supplier-specific evidence; midpoint for weak priors."""
-        est = self.estimates.get(sid)
-        return "high" if est is not None and est.source == "supplier-should-cost" else "mid"
-
     def supplier(self, sid, scenario=None):
         """Our estimate of the supplier for the relationship term; scenario "none" leaves it out."""
         est = self.estimates.get(sid)
         if not self.relationship or est is None or scenario == "none":
             return None
-        scenario = scenario or self.risk_scenario(sid)
+        scenario = scenario or "mid"
         return {
             "standard": self.standard(sid),
             "full_cost": est.full_cost[SCENARIO[scenario]],
