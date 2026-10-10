@@ -220,3 +220,6 @@ __marimo__/
 .streamlit/secrets.toml
 # Buyer run state
 runs/
+
+# Local git worktrees
+.worktrees/
