@@ -1,0 +1,164 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4K0FVJJ2HVFG5KXQ6Y386Z6",
+  "session_id": "85659574-f9ad-4761-bdf5-07c4c69e9023",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-10T13:36:57.592866Z",
+  "branch": "main",
+  "checkpoints_count": 14,
+  "save_step_count": 9,
+  "files_touched": [
+    ".gitignore",
+    "starter-kit/arena_kit/agents/llm.py",
+    "starter-kit/arena_kit/agents/naive.py"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-5-5",
+  "turn_id": "a2d595e5ba88",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 226,
+    "cache_creation_tokens": 422501,
+    "cache_read_tokens": 13527141,
+    "output_tokens": 121337,
+    "api_call_count": 111
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-init-2026-10-10T10:21:44.156966Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "init"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "84947dc3e909",
+      "timestamp": "2026-10-10T10:21:44.156966Z",
+      "native": {
+        "command": "/init"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/init",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 17
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-10T13:36:57.506005Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 1268,
+    "human_modified": 38,
+    "human_removed": 0,
+    "total_committed": 1268,
+    "total_lines_changed": 1310,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 9,
+      "user_lines_removed": 9,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "starter-kit/.env.example": 9
+      },
+      "user_removed_per_file": {
+        "starter-kit/.env.example": 9
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 9,
+      "agent_lines_removed": 9
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 181,
+      "user_lines_removed": 12,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130,
+        "starter-kit/arena_kit/agents/llm.py": 49,
+        "starter-kit/arena_kit/agents/naive.py": 2
+      },
+      "user_removed_per_file": {
+        "starter-kit/arena_kit/agents/llm.py": 7,
+        "starter-kit/arena_kit/agents/naive.py": 5
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    },
+    {
+      "checkpoint_number": 8,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    },
+    {
+      "checkpoint_number": 9,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    },
+    {
+      "checkpoint_number": 10,
+      "user_lines_added": 130,
+      "user_lines_removed": 0,
+      "agent_lines_added": 51,
+      "agent_lines_removed": 12,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/agents/evidence.py": 130
+      }
+    }
+  ]
+}
