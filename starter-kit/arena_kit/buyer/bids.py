@@ -98,7 +98,17 @@ def generate(ev, space, sid, target_c, their_price, standing=None):
     return out
 
 
-def select(evaluated, demand=None, ceiling=None, n=3, *, values=(), reference=None):
+def select(
+    evaluated,
+    demand=None,
+    ceiling=None,
+    n=3,
+    *,
+    values=(),
+    conditions=(),
+    supplier_floor=None,
+    reference=None,
+):
     """Up to `n` diverse sheets: the one closest to our ideal terms (the highest price - simple
     suppliers read the price), the one worth most to the supplier, and one more. `demand(terms)`:
     per lever, how much a sheet asks of the supplier - a sheet that asks more than another worth no
@@ -112,27 +122,63 @@ def select(evaluated, demand=None, ceiling=None, n=3, *, values=(), reference=No
         below = [e for e in evaluated if e.terms["unit_price"] <= ceiling]
         evaluated = below or [min(evaluated, key=lambda e: e.terms["unit_price"])]
     pairs = [(e, demand(e.terms) if demand else {}) for e in evaluated]
-    if demand:
-        pairs = [(e, d) for e, d in pairs if not _dominated(e, d, pairs)]
+
+    def condition_rank(e):
+        rank = []
+        for fields in conditions:
+            relevant = [f for f in fields if f != "unit_price" and f in e.terms and f in (reference or {})]
+            matched = sum(e.terms[f] == reference[f] for f in relevant)
+            rank.extend((bool(relevant) and matched == len(relevant), matched))
+        return tuple(rank)
 
     def preference(e):
         if not reference:
             return 0
-        return sum(
-            (reference.get(f, e.terms.get(f)) - e.terms.get(f, reference.get(f)))
-            if f == "payment_days"
-            else (e.terms.get(f, reference.get(f)) - reference.get(f, e.terms.get(f)))
-            if f in ("volume_per_year", "contract_months", "lead_time_days")
-            else 0
-            for f in values
-            if isinstance(reference.get(f), int | float) and isinstance(e.terms.get(f), int | float)
-        )
+        score = 0
+        for field in values:
+            value, live = e.terms.get(field), reference.get(field)
+            if isinstance(value, int | float) and isinstance(live, int | float):
+                if field == "payment_days":
+                    score += live - value
+                elif field in ("volume_per_year", "contract_months", "lead_time_days"):
+                    score += value - live
+            elif field in e.terms and field in reference:
+                score += int(value == live)
+        return score
 
+    max_condition = max((condition_rank(e) for e, _ in pairs), default=())
+    pairs = [
+        (e, d)
+        for e, d in pairs
+        if (conditions and condition_rank(e) == max_condition) or not demand or not _dominated(e, d, pairs)
+    ]
     by_cash = [e for e, _ in sorted(pairs, key=lambda p: (-preference(p[0]), -p[0].cash_theirs, sum(p[1].values())))]
     by_price = [e for e, _ in sorted(pairs, key=lambda p: (-p[0].terms["unit_price"], sum(p[1].values())))]
+    by_condition = [
+        e
+        for e, _ in sorted(
+            pairs,
+            key=lambda p: (condition_rank(p[0]), preference(p[0]), p[0].cash_theirs, -p[0].c),
+            reverse=True,
+        )
+    ]
+    by_friendly = [
+        e
+        for e, _ in sorted(pairs, key=lambda p: (-p[0].cash_theirs, p[0].c))
+        if supplier_floor is not None and e.cash_theirs >= supplier_floor - 0.005
+    ]
+    by_relief = [e for e, d in sorted(pairs, key=lambda p: (sum(p[1].values()), -p[0].cash_theirs, p[0].c))]
     picks = []
-    first = by_cash[0] if values else by_price[0]
-    for e in (first, by_price[0], by_cash[0], *by_cash[1:]):
+    ordered = [
+        *(by_condition[:1] if conditions else []),
+        *by_friendly[:1],
+        *by_relief[:1],
+        by_price[0],
+        by_cash[0],
+        *by_condition,
+        *by_cash,
+    ]
+    for e in ordered:
         if len(picks) == n:
             break
         if all(_distance(e.terms, p.terms) > 0 for p in picks):

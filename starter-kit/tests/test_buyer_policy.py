@@ -214,27 +214,65 @@ def test_responsive_filter_never_discards_the_only_safe_package():
     assert acceptance.responsive_packages([package], t, ev, assess(t)) == [package]
 
 
-def test_responsive_filter_sends_nothing_when_every_novel_package_loses_supplier_value():
+def test_responsive_filter_keeps_safe_novel_packages_when_none_preserves_value():
     ev = evaluator()
     old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
     worse = {"unit_price": 100.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
     t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
     t.my_sheets = [old]
     package = ev.evaluate(CandidatePackage("sup:A", worse, "terms"))
-    assert acceptance.responsive_packages([package], t, ev, assess(t)) == []
+    assert acceptance.responsive_packages([package], t, ev, assess(t)) == [package]
 
 
-def test_responsive_filter_exposes_only_supplier_value_preserving_candidates():
+def test_responsive_filter_orders_a_value_preserving_package_before_exploration():
     ev = evaluator()
     old = {"unit_price": 100.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
+    explore = {"unit_price": 100.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
     friendly = {"unit_price": 101.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP"}
-    worse = [
-        {"unit_price": price, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"} for price in (99.0, 100.0)
-    ]
     t = thread(ev, prices=(110.0, 110.0), mine=(190_000.0,))
     t.my_sheets = [old]
-    packages = [ev.evaluate(CandidatePackage("sup:A", terms, "terms")) for terms in (*worse, friendly)]
-    assert acceptance.responsive_packages(packages, t, ev, assess(t)) == [packages[-1]]
+    packages = [ev.evaluate(CandidatePackage("sup:A", terms, "terms")) for terms in (explore, friendly)]
+    assert acceptance.responsive_packages(packages, t, ev, assess(t)) == [packages[1], packages[0]]
+
+
+def test_select_keeps_condition_match_value_guarantee_and_exploration():
+    ev = evaluator()
+    clause = {"series": "S", "material_share": 0.45, "deadband_pct": 0.0, "base_month": "2026-08"}
+    terms = [
+        {"unit_price": 100.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP", "index_clause": clause},
+        {"unit_price": 101.0, "payment_days": 30, "contract_months": 24, "incoterm": "DAP", "index_clause": None},
+        {"unit_price": 100.5, "payment_days": 60, "contract_months": 12, "incoterm": "DAP", "index_clause": None},
+    ]
+    packages = [ev.evaluate(CandidatePackage("sup:A", item, "terms")) for item in terms]
+    reference = {"payment_days": 90, "contract_months": 24, "incoterm": "DAP", "index_clause": clause}
+    out = bids.select(
+        packages,
+        demand=lambda item: {"payment_days": max(0, item["payment_days"] - 30) / 60},
+        n=2,
+        conditions=(("index_clause", "contract_months"),),
+        supplier_floor=packages[1].cash_theirs,
+        reference=reference,
+    )
+    assert out[0] is packages[0]
+    assert packages[1] in out
+
+
+def test_select_resolves_equal_condition_coverage_deterministically():
+    ev = evaluator()
+    packages = [
+        ev.evaluate(CandidatePackage("sup:A", terms, "terms"))
+        for terms in (
+            {"unit_price": 100.0, "payment_days": 90, "contract_months": 12, "incoterm": "DAP"},
+            {"unit_price": 100.0, "payment_days": 60, "contract_months": 24, "incoterm": "DAP"},
+        )
+    ]
+    out = bids.select(
+        packages,
+        conditions=(("payment_days",), ("contract_months",)),
+        reference={"payment_days": 90, "contract_months": 24, "incoterm": "DAP"},
+        n=1,
+    )
+    assert out == [packages[0]]
 
 
 def test_a_regression_meets_a_hold_and_is_not_accepted_early():

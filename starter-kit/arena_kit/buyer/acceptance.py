@@ -145,16 +145,23 @@ def keep_alive(cs, ev, threads):
     return {t.sid for t in quoting[: cs.playbook.rfq_keep]} | {t.sid for t in threads if c_of(ev, t) == math.inf}
 
 
+def previous_supplier_value(t, ev, assessment):
+    """Return the best estimated supplier value from our immediately preceding portfolio."""
+    if not t.my_sheets or assessment.firmness == 0:
+        return None
+    return max(ev.cash_theirs(t.sid, terms) for terms in t.my_sheets)
+
+
 def responsive_packages(packages, t, ev, assessment):
-    """When the supplier holds, change the package and preserve at least the cash value we last
-    offered it. All inputs already passed generation's cost, validity and reservation guards."""
+    """Prefer novel supplier-value-preserving packages without deleting safe exploration."""
     if not t.my_sheets or assessment.firmness == 0:
         return packages
     novel = [p for p in packages if p.terms not in t.my_sheets]
     if not novel:
         return packages
-    previous = max(ev.cash_theirs(t.sid, terms) for terms in t.my_sheets)
-    return [p for p in novel if p.cash_theirs >= previous - 0.005]
+    floor = previous_supplier_value(t, ev, assessment)
+    friendly = [p for p in novel if p.cash_theirs >= floor - 0.005]
+    return [*friendly, *(p for p in novel if p not in friendly)]
 
 
 def decide(cs, ev, space, order, urgent=False, waiting=()):
