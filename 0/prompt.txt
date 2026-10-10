@@ -1,0 +1,5 @@
+/init
+
+---
+
+Write there that no smoke tests, no bloat, lean code, clear structure.
