@@ -318,14 +318,13 @@ def test_better_terms_can_pay_a_price_above_current_quote():
     assert all(e.c <= target + 0.01 for e in selected)
 
 
-def test_explicit_dependencies_block_acceptance_until_agreement():
+def test_a_stated_dependency_never_blocks_a_deal():
     ev = evaluator()
     t = thread(ev, status="final_offer")
-    t.observation = SupplierObservation("m", "f", dependencies=({"condition": "approval pending"},))
+    t.observation = SupplierObservation("m", "f", dependencies=({"condition": "our general terms apply"},))
     cs, space = state(CASE, [t], ev)
-    assert not feasible(cs, ev, t)
-    assert decide(cs, ev, space, [t.sid], urgent=True).kind == "walk"
-    assert feasible(cs, ev, replace(t, status="agreed"))
+    assert feasible(cs, ev, t)
+    assert decide(cs, ev, space, [t.sid]).kind == "accept"
 
 
 def test_observed_cash_and_firmness_affect_assessment():

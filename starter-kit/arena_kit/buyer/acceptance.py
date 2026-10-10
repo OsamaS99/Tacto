@@ -33,17 +33,11 @@ def c_of(ev, t, scenario=None):
     return ev.c(t.sid, t.standing, scenario)
 
 
-def unresolved(t):
-    """Explicit binding conditions remain unresolved until an official agreement."""
-    observation = getattr(t, "observation", None)
-    return t.status != "agreed" and bool(observation and observation.dependencies)
-
-
 def feasible(cs, ev, t):
     """A current unconditional standing sheet that keeps the must-haves and beats the alternative. A
     standing sheet is the supplier's own price, so the rough relationship estimate must never turn a
     deal that beats the alternative into a walk-away (case P01): that comparison leaves it out."""
-    if t.status not in LIVE or unresolved(t):
+    if t.status not in LIVE:
         return False
     c = c_of(ev, t, "none")
     return math.isfinite(c) and must_haves_ok(cs.case, t.standing, t.std) and c <= cs.c_alt
@@ -52,8 +46,6 @@ def feasible(cs, ev, t):
 def floor_c(ev, t):
     """Project a rival on feasible terms; invalid offers are not themselves attainable deals."""
     c = c_of(ev, t)
-    if unresolved(t) and (t.status != "open" or t.moves_left <= 0):
-        return math.inf
     if not must_haves_ok(ev.case, t.standing, t.std):
         if t.status != "open" or t.moves_left <= 0 or not math.isfinite(c):
             return math.inf
@@ -174,10 +166,6 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         if t.status not in LIVE:
             continue
         a = assess(t, getattr(t, "label", None))
-        if unresolved(t):
-            if t.status == "open" and t.moves_left > 1 and (t.rounds_used == 0 or sid in waiting):
-                return DecisionProposal("send", sid, question="variant", reason="clarify unresolved binding conditions")
-            continue
         c_now = c_of(ev, t)
         takeable = feasible(cs, ev, t) and dominates(ev, t, threads)
         alt = None if late else alternative(cs, ev, space, t, threads)  # late: no round to spare

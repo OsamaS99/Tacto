@@ -382,7 +382,6 @@ def rival_claims(cs, sid):
             or (mine and price >= mine)
             or t.status not in ("open", "final_offer", "agreed")
             or not must_haves_ok(cs.case, t.standing, t.std)
-            or (t.observation and t.observation.dependencies and t.status != "agreed")
         ):
             continue
         gap = (mine - price) / mine if mine else 0.0
