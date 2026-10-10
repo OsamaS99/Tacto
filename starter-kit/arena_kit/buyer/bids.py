@@ -16,7 +16,7 @@ def anchor_price(case, dossier, their_price, sid=None):
     defence or a renewal, never below what the data supports."""
     b = case["buyer"]
     current = b.get("current_unit_price")
-    options = [0.9 * their_price]
+    options = [0.85 * their_price]
     if current:
         justified = dossier.justified_move_pct if dossier and dossier.justified_move_pct is not None else 0.0
         options.append(current * (1 + max(0.0, justified) / 100))
