@@ -141,6 +141,13 @@ def test_normalization_clears_a_trade_missing_from_an_appended_package():
     assert "payment terms shown" not in msg.body
 
 
+def test_unknown_trade_uses_template_instead_of_normalizing_it_away():
+    call, _ = replies(turn(trade="lead_time_days"))
+    msg, source, _ = writer.write_turn(Model([("m", call)]), PKT, 10.0)
+    assert source == "template"
+    assert msg == writer.template(PKT)
+
+
 def test_revision_one_is_not_first_contact_after_a_buyer_message():
     call, _ = replies(turn(package_ids=("P1", "P2"), claim_ids=()))
     msg, source, _ = writer.write_turn(Model([("m", call)]), replace(PKT, rev=1, first_contact=False), 10.0)

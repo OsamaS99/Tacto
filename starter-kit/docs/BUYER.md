@@ -38,7 +38,9 @@ Preparation runs before opening. Direct callers supplying already-open threads r
 The deterministic policy opens with up to three safe Pareto-diverse packages, then narrows later
 turns to at most two. Grounded conditional trades rank matching packages first; a holding supplier
 still receives at least one package that preserves estimated supplier value when one exists, while
-another safe branch may remain for exploration. The live supplier price caps generated unit prices.
+another safe branch may remain for exploration. The live supplier price bounds selected/generated unit
+prices when feasible candidates at or below it exist; if none do, selection keeps the safest cheapest
+feasible branch, which may be above that live price.
 
 The communication model selects only approved IDs. Safe omissions are completed from the approved
 menus and logged as `writer=llm_normalized`; `writer=llm` means no completion was needed and

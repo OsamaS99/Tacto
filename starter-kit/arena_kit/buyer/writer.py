@@ -144,7 +144,7 @@ def normalize_turn(out, packages, claims, pkt):
         if pkt.first_contact and claims and not normalized["claim_ids"]:
             normalized["claim_ids"].append(next(iter(claims)))
         trade = normalized["trade"]
-        if trade and any(trade not in packages[i] for i in normalized["package_ids"]):
+        if trade in pkt.trades and any(trade not in packages[i] for i in normalized["package_ids"]):
             normalized["trade"] = None
     return normalized, normalized != out
 
