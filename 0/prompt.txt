@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>bhj0xr9kq</task-id>
+<tool-use-id>toolu_01UQpYHPNPmM4ReHntT389Pg</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-osama-salem-Documents-ehl/85659574-f9ad-4761-bdf5-07c4c69e9023/tasks/bhj0xr9kq.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for the practice run to finish, then summarise closes" completed (exit code 0)</summary>
+</task-notification>
