@@ -12,7 +12,7 @@ from dataclasses import asdict, replace
 
 from ..cost import must_haves_ok
 from ..docs import standard_terms
-from ..play import MOVE_LIMIT_S, latest, moves_left
+from ..play import MOVE_LIMIT_S, closing_move, latest, moves_left
 from . import bids
 from .acceptance import closing, decide, feasible, live
 from .economics import EconomicEvaluator, estimate_supplier
@@ -215,22 +215,29 @@ class BuyerAgent:
 
     # -- one turn -------------------------------------------------------------------------------
     def decide(self, case, threads, turn_context=None):
-        """The next move; a failed optional component closes through the same financial guard."""
+        """The next move. A failure retries once on rules and templates alone (no model, no
+        interpreter): a broken optional component must not cost the negotiation. If that fails too,
+        the case closes through the same financial guard, and `closing_move` is the last resort."""
         if turn_context is not None:
             self.set_turn_context(turn_context)
+        for degraded in (False, True):
+            try:
+                return self._decide(case, threads, degraded)
+            except Exception:
+                log.exception("%s: the buyer failed%s", case.get("case_id"), " again" if degraded else " - retrying")
+        self.event = {"reason": "buyer failed: closing move", "source": "fallback"}
         try:
-            return self._decide(case, threads)
-        except Exception:
-            log.exception("%s: the buyer failed - closing move instead", case.get("case_id"))
-            self.event = {"reason": "buyer failed: closing move", "source": "fallback"}
             return self.close_decision(case, threads, reason="buyer failure")
+        except Exception:
+            log.exception("%s: the closure failed - plain closing move", case.get("case_id"))
+            return closing_move(case, threads)
 
-    def _decide(self, case, threads):
+    def _decide(self, case, threads, degraded=False):
         t0 = self.clock()
         if case["case_id"] != self.case_id:
             self.prepare(case, allow_model=False)
         cs, econ = self.observe(case, threads, t0)
-        self.label(cs, threads)
+        self.label(cs, threads, allow_model=not degraded)
         pending = set(self.turn_context.in_flight) if self.turn_context else set()
         order = sorted((t.sid for t in live(cs) if t.sid not in pending), key=lambda s: self.since.get(s, 0.0))
         waiting = {s for s in order if self.clock() - self.since.get(s, t0) >= KEEP_ALIVE_S}
@@ -260,7 +267,7 @@ class BuyerAgent:
         w0 = self.clock()
         try:
             msg, source, read = write_turn(
-                self.model,
+                None if degraded else self.model,
                 packet,
                 self.budget(proposal.sid),
                 case["case_id"],

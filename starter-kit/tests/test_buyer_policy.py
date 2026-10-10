@@ -484,6 +484,21 @@ def test_the_turn_never_raises(monkeypatch):
     assert move["message"]["action"] == {"type": "accept", "term_sheet_id": "offer:A-0"}  # the closing move
 
 
+def test_a_failing_optional_component_retries_on_rules_instead_of_closing(monkeypatch):
+    from arena_kit.buyer import BuyerAgent
+
+    plain = BuyerAgent.label
+
+    def label(self, cs, threads, *, allow_model=True):
+        if allow_model:
+            raise RuntimeError("interpreter down")
+        return plain(self, cs, threads, allow_model=False)
+
+    monkeypatch.setattr(BuyerAgent, "label", label)
+    move = BuyerAgent().decide(CASE, opened())
+    assert move["message"]["term_sheets"] and "action" not in move["message"]  # a bid, not an accept
+
+
 def test_a_rough_relationship_estimate_never_turns_a_better_final_offer_into_a_walk():
     # case P01: should-cost above the price made the pessimistic relationship charge exceed the alternative
     alt = {"kind": "quote", "ref": "q", "terms": {"unit_price": 112.0, "payment_days": 30, "incoterm": "DAP"}}
