@@ -1,1 +1,129 @@
 Add .gitignore
+
+---
+
+I think I should have started from here, can you take care of this?
+
+<pasted_content id="1845">
+**Start with the supplied agent, get one complete negotiation working, then improve its data preparation and offer selection.** The competition rewards total deal value, so better evidence and reliable calculations are likely to matter more than a complicated agent architecture.
+
+I read the repository’s brief, starter instructions, data guide and submission requirements. The arena website itself wasn’t accessible through my browsing tool.
+
+This is also an important addition to our earlier research: **Tacto has published an MIT-licensed buyer starter kit and local simulator. Its actual supplier agents remain hosted.** [Official repository](https://github.com/tacto-ai/negotiation-arena-kit).
+
+**1. Get a working baseline**
+
+You need Git, Python 3.12 and `uv`.
+
+```bash
+git clone https://github.com/tacto-ai/negotiation-arena-kit.git
+cd negotiation-arena-kit/starter-kit
+uv sync --all-extras
+cp .env.example .env
+```
+
+Apply for your team key at [the application page](https://arena.tacto.ai/apply), show your match code at the Tacto table, and copy the key into `.env` as `ARENA_API_KEY`. Keep it out of Git and Discord.
+
+Then run:
+
+```bash
+uv run arena me
+uv run arena cases
+uv run arena play case:P01 -v
+```
+
+Your first goal is simply to finish a case and inspect its score and replay. [Setup instructions](https://github.com/tacto-ai/negotiation-arena-kit#start-in-15-minutes).
+
+**No key yet?** Run the local simulator in one terminal:
+
+```bash
+uv run arena-sim serve --no-clock
+```
+
+In a second terminal:
+
+```bash
+ARENA_URL=http://127.0.0.1:8000 uv run arena register "Hello World" sim
+```
+
+Use the simulator key it prints:
+
+```bash
+ARENA_URL=http://127.0.0.1:8000 ARENA_API_KEY=<simulator-key> uv run arena play case:S01 -v
+```
+
+The simulator checks your integration; its scripted supplier won’t teach you the hosted opponents’ negotiation strategies. [Local walkthrough](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/starter-kit/README.md#hello-world-local-3-commands).
+
+**2. Understand what wins before changing the agent**
+
+The accepted deal is evaluated across a fixed need and time horizon. Its cost includes price, uncovered demand, payment timing, freight, delivery delays, quality and other applicable terms. Certain strategic cases also penalize leaving the supplier with an unsustainable margin.
+
+**A lower unit price can produce a worse score** if the contract covers too little demand or has unfavorable other terms. Breaking a must-have scores zero; walking away can be the correct choice. [Scoring rules](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/brief/brief.md#6-the-score-total-cost-in-).
+
+My recommendation: make the published `total_cost` function your offer evaluator. Let code calculate and validate; let the model interpret the supplier and write the email.
+
+**3. Build a short preparation file for every case**
+
+Before opening negotiations, collect:
+
+| Context | Where to look |
+|---|---|
+| Previous prices and concessions | `price_conditions`, `negotiation_history` |
+| Supplier reliability | `scorecards`, delivery and quality records |
+| Existing obligations | Contracts and clauses |
+| Supplier interests | Correspondence, call notes, news |
+| Cost evidence | `cost_drivers`, `index_values`, `should_cost` |
+| Buyer behavior | Forecast accuracy and invoice/payment history |
+
+Retain the evidence IDs alongside each finding. Check price units carefully: some prices are per 100 or 1,000 pieces, or per kg/metre. [Data guide](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/data/README.md).
+
+A useful preparation summary is:
+
+> Our objective; mandatory terms; best alternative; strongest relevant evidence; likely supplier interests; tradeable terms; unresolved questions.
+
+**4. Improve three decisions first**
+
+These are my suggested implementation priorities:
+
+- **What to ask:** request information that could change your next offer—cost breakdown, capacity, delivery schedule or approval requirements.
+- **What to offer:** generate two or three packages trading price against payment, duration or other allowed terms; calculate each package’s total cost.
+- **When to close:** compare valid standing offers with your alternative and remaining time. Don’t lose an acceptable deal while chasing a marginal improvement.
+
+For example, a supplier concerned about cash might prefer faster payment for a price reduction. A supplier with limited authority over price might move on delivery or another term.
+
+**Emails alone do not bind the deal: structured term sheets do.** Explicitly accept a supplier’s standing term-sheet ID to close. An `agreed` response still requires your acceptance. [API contract](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/brief/api.md).
+
+**5. Practice with a controlled learning loop**
+
+Configure your model using the starter README, download the data, then try:
+
+```bash
+uv run arena data
+uv run arena play case:P01 --agent llm -v
+```
+
+After each run, inspect:
+
+- Which cost component improved or worsened?
+- Which argument was verified, irrelevant or contradicted?
+- What did the supplier reveal about its priorities?
+- Did your closing decision preserve the best available outcome?
+
+Change one behavior at a time and compare results. You have **200 practice sessions per rolling 24 hours**, so reserve sessions for final rehearsal. Your own agent implements `decide(case, threads)`; retain the starter client and runner initially. [Starter guide](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/starter-kit/README.md).
+
+**6. Prepare for Sunday**
+
+For this weekend, Sunday is **11 October**. The published schedule calls for refreshing data after **08:00**, a pre-flight at **09:00**, and code/submission freeze at **12:00**.
+
+Start the supplied final runner before noon:
+
+```bash
+uv run arena run --set final --agent llm --parallel 10
+```
+
+That command runs the starter LLM agent; adapt the integration when using your implementation. Submit your accessible repository, running commit hash, approach description and slides. During the final, no human intervention or agent access to the prohibited live feeds is allowed. Keep the machine powered and awake. [Submission checklist](https://github.com/tacto-ai/negotiation-arena-kit/blob/main/brief/submission.md).
+
+**Your first milestone should be one completed hosted case with a replay you can explain: why you chose each argument, what you traded, and why you accepted or walked away.**
+</pasted_content id="1845">
+
+Like fork this code into here and push it upstream on my repository
