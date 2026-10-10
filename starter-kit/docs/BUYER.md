@@ -33,6 +33,18 @@ Preparation runs before opening. Direct callers supplying already-open threads r
 5. The communication role selects approved IDs. Code renders every public sentence. Private rationale is never sent. Claims are checked again against the selected package.
 6. Every send, acceptance and fallback passes contract and financial checks.
 
+### Adaptive portfolios
+
+The deterministic policy opens with up to three safe Pareto-diverse packages, then narrows later
+turns to at most two. Grounded conditional trades rank matching packages first; a holding supplier
+still receives at least one package that preserves estimated supplier value when one exists, while
+another safe branch may remain for exploration. The live supplier price caps generated unit prices.
+
+The communication model selects only approved IDs. Safe omissions are completed from the approved
+menus and logged as `writer=llm_normalized`; `writer=llm` means no completion was needed and
+`writer=template` means the model was absent, late or invalid. Cost, must-haves, acceptance and
+walk-away remain deterministic.
+
 Supplier-specific should-cost uses the high relationship scenario; weak priors use the middle scenario. Bidding, ranking and acceptance share the same choice. All scenarios remain available for diagnosis. `cost.py` remains the single source of truth.
 
 ## Deadlines and recovery

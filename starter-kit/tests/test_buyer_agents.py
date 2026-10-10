@@ -14,6 +14,31 @@ from arena_kit.buyer.store import Store
 from arena_kit.buyer.writer import disclosure
 
 
+def test_agent_event_records_normalized_writer_output():
+    answer = {
+        **TURN.example,
+        "package_ids": ["P1"],
+        "claim_ids": [],
+        "question": None,
+    }
+    agent = BuyerAgent(model=Model([("mock", lambda system, user, timeout: json.dumps(answer))]))
+    agent.prepare(CASE, allow_model=False)
+    events = {
+        "sup:A": [
+            {
+                "from": "supplier",
+                "message_id": "opening",
+                "status": "open",
+                "body": "Standing offer.",
+                "term_sheets": [{"term_sheet_id": "offer:A", "terms": {"unit_price": 110.0, **STD}}],
+            }
+        ]
+    }
+    move = agent.decide(CASE, events)
+    assert move["message"]["term_sheets"]
+    assert agent.event["writer"] == "llm_normalized"
+
+
 def test_preparation_and_interpretation_are_persisted_and_cached_across_restart(tmp_path):
     calls = []
 
