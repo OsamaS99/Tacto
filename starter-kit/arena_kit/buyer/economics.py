@@ -39,8 +39,9 @@ class EconomicEvaluator:
         return closing_terms(self.case, {"unit_price": 0.0}, self.std.get(sid))
 
     def supplier(self, sid, scenario="mid"):
+        """Our estimate of the supplier for the relationship term; scenario "none" leaves it out."""
         est = self.estimates.get(sid)
-        if not self.relationship or est is None:
+        if not self.relationship or est is None or scenario == "none":
             return None
         return {
             "standard": self.standard(sid),

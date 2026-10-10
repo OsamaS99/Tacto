@@ -380,3 +380,17 @@ def test_the_turn_never_raises(monkeypatch):
     monkeypatch.setattr(agent, "decide", broken)
     move = BuyerAgent().decide(CASE, opened())
     assert move["message"]["action"] == {"type": "accept", "term_sheet_id": "offer:A-0"}  # the closing move
+
+
+def test_a_rough_relationship_estimate_never_turns_a_better_final_offer_into_a_walk():
+    # case P01: should-cost above the price made the pessimistic relationship charge exceed the alternative
+    alt = {"kind": "quote", "ref": "q", "terms": {"unit_price": 112.0, "payment_days": 30, "incoterm": "DAP"}}
+    case = with_buyer(category_goal="stabilise", sustainable_margin_pct=8, relationship_eur_per_point=50_000,
+                      alternative=alt)  # fmt: skip
+    ev = evaluator(case, estimates={"sup:A": SupplierEstimate((105.0, 110.0, 115.0))})
+    full = {"payment_days": 30, "contract_months": 24, "incoterm": "DAP", "unit_price": 108.0}
+    t = thread(ev, prices=(112.0, 108.0), mine=(200_000.0,), status="final_offer", standing=full)
+    cs, space = state(case, [t], ev, pb=replace(playbook(case), mirror_final=False))
+    assert ev.c("sup:A", full, "high") > cs.c_alt > ev.c("sup:A", full, "none")
+    p = decide(cs, ev, space, ["sup:A"])
+    assert (p.kind, p.term_sheet_id) == ("accept", t.offer_id)

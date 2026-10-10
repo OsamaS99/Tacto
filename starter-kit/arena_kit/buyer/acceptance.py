@@ -32,9 +32,11 @@ def c_of(ev, t, scenario="mid"):
 
 
 def feasible(cs, ev, t):
-    """A sheet we may take: it exists, keeps the must-haves and beats the alternative (pessimistic C;
-    without an alternative any priced sheet)."""
-    c = c_of(ev, t, "high")
+    """A sheet we may take: it exists, keeps the must-haves and beats the alternative (without an
+    alternative: any priced sheet). A standing sheet is the supplier's own price, so it does not
+    squeeze the supplier: our estimate of the relationship charge - rough by nature - must never
+    turn a deal that beats the alternative into a walk-away (case P01 walked from a better offer)."""
+    c = c_of(ev, t, "none")
     return math.isfinite(c) and must_haves_ok(cs.case, t.standing, t.std) and c <= cs.c_alt
 
 
