@@ -7,25 +7,26 @@ import math
 
 from ..cost import RELATIONSHIP_GOALS, closing_terms, supplier_value, total_cost
 from .records import CandidatePackage, EvaluatedPackage, SupplierEstimate
+from .space import finite_number
 
 SCENARIO = {"low": 0, "mid": 1, "high": 2}  # index into SupplierEstimate.full_cost; high = dearest C
 LEAD_DAY = 0.003  # share of its price a supplier charges per day of delivery faster than it quoted
 
 
 def estimate_supplier(dossier, sid, price, cash_pressure=False, cap=None):
-    """Full cost from the supplier's should-cost row, else the generic one, else 92 % of its price
-    (the should-cost error of 5-15 % sets the spread). Cash pressure raises its cost of money.
-    `cap`: the most its full cost can be - what its own cheapest sheet is worth to it less the
-    sustainable margin (case P02: a should-cost above the ask made the relationship term cancel
-    our price signal)."""
+    """Dated cost evidence, or a weak prior from the opening price. The legacy `cap` is ignored:
+    an offer does not establish manufacturing cost or a sustainable margin."""
+    if not finite_number(price) or price <= 0:
+        raise ValueError("opening price must be positive and finite")
     found = (dossier.should_cost.get(sid) or dossier.should_cost.get("*")) if dossier else None
     if found:
         cost, conf = found
-        spread, source = max(conf, 5.0) / 100, "should-cost"
+        if not finite_number(cost) or cost <= 0 or not finite_number(conf) or not 0 <= conf < 100:
+            raise ValueError("invalid should-cost or error range")
+        spread = max(conf, 5.0) / 100
+        source = "supplier-should-cost" if sid in dossier.should_cost else "generic-should-cost"
     else:
         cost, spread, source = 0.92 * price, 0.07, "default"
-    if cap is not None and 0 < cap < cost:
-        cost = cap
     return SupplierEstimate(
         full_cost=(cost * (1 - spread), cost, cost * (1 + spread)),
         interest_rate=0.12 if cash_pressure else 0.08,
@@ -45,25 +46,44 @@ class EconomicEvaluator:
         """The supplier's standard terms, completed from the case, as `cost.supplier_value` reads them."""
         return closing_terms(self.case, {"unit_price": 0.0}, self.std.get(sid))
 
-    def supplier(self, sid, scenario="mid"):
+    def risk_scenario(self, sid):
+        """Use the upper cost bound for supplier-specific evidence; midpoint for weak priors."""
+        est = self.estimates.get(sid)
+        return "high" if est is not None and est.source == "supplier-should-cost" else "mid"
+
+    def supplier(self, sid, scenario=None):
         """Our estimate of the supplier for the relationship term; scenario "none" leaves it out."""
         est = self.estimates.get(sid)
         if not self.relationship or est is None or scenario == "none":
             return None
+        scenario = scenario or self.risk_scenario(sid)
         return {
             "standard": self.standard(sid),
             "full_cost": est.full_cost[SCENARIO[scenario]],
             "interest_rate": est.interest_rate,
         }
 
-    def c(self, sid, terms, scenario="mid"):
-        return total_cost(self.case, terms, self.std.get(sid), self.supplier(sid, scenario))
+    def c(self, sid, terms, scenario=None):
+        """One consistent policy scenario. Malformed prices or non-finite costs are infeasible."""
+        if not finite_number(terms.get("unit_price")) or terms["unit_price"] <= 0:
+            return math.inf
+        try:
+            c = total_cost(self.case, terms, self.std.get(sid), self.supplier(sid, scenario))
+        except (ArithmeticError, TypeError, ValueError, KeyError):
+            return math.inf
+        return c if finite_number(c) else math.inf
 
     def c_alt(self):
         """C of the alternative; infinite without one (`kind: none`, or terms without a price)."""
         alt = self.case["buyer"].get("alternative") or {}
         terms = alt.get("terms") or {}
-        return total_cost(self.case, terms) if terms.get("unit_price") else math.inf
+        if not finite_number(terms.get("unit_price")) or terms["unit_price"] <= 0:
+            return math.inf
+        try:
+            c = total_cost(self.case, terms)
+        except (ArithmeticError, TypeError, ValueError, KeyError):
+            return math.inf
+        return c if finite_number(c) else math.inf
 
     def cash_theirs(self, sid, terms):
         """What a sheet is worth to the supplier per unit. A chargeback costs it at the defect rate it
@@ -91,7 +111,11 @@ class EconomicEvaluator:
         """The price below which C rises again (relationship goals: squeezing costs); 0 without."""
         if self.supplier(sid) is None:
             return 0.0
-        lo, hi = 0.3 * terms["unit_price"], 1.5 * terms["unit_price"]
+        lo, hi = 0.01, max(1.5 * terms["unit_price"], 1.0)
+        for _ in range(30):
+            if self.c(sid, {**terms, "unit_price": hi}) <= self.c(sid, {**terms, "unit_price": hi * 1.5}):
+                break
+            hi *= 1.5
         for _ in range(60):  # golden section: C is convex in the price
             a, b = lo + (hi - lo) * 0.382, lo + (hi - lo) * 0.618
             if self.c(sid, {**terms, "unit_price": a}) <= self.c(sid, {**terms, "unit_price": b}):
@@ -103,17 +127,23 @@ class EconomicEvaluator:
     def price_for(self, sid, terms, target_c):
         """The highest price in cents at which `terms` costs at most `target_c` (+1 cent: C is rounded),
         not below `best_price`; None if even that price costs more."""
+        if not finite_number(target_c) or not finite_number(terms.get("unit_price")):
+            return None
         floor = self.best_price(sid, terms)
         p0 = max(terms["unit_price"], floor + 1.0)
         c0, c1 = self.c(sid, {**terms, "unit_price": p0}), self.c(sid, {**terms, "unit_price": p0 + 1})
-        if c1 - c0 <= 0:
+        if not finite_number(c0) or not finite_number(c1) or c1 - c0 <= 0:
             return None
         if not floor:  # no relationship term: C is linear in the price
             p = p0 + (target_c - c0) / (c1 - c0)
         else:  # increasing above best_price: bisect
             lo, hi = floor, p0
-            while self.c(sid, {**terms, "unit_price": hi}) < target_c:
+            for _ in range(60):
+                if self.c(sid, {**terms, "unit_price": hi}) >= target_c:
+                    break
                 hi *= 1.5
+            else:
+                return None
             for _ in range(60):
                 mid = (lo + hi) / 2
                 lo, hi = (mid, hi) if self.c(sid, {**terms, "unit_price": mid}) <= target_c else (lo, mid)

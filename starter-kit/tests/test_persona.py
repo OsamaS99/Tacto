@@ -103,7 +103,9 @@ def test_a_contradicted_claim_hardens_it():
     lied, sid_b, _, b = start()
     send(plain, sid_a, 80.0)
     reply = send(lied, sid_b, 80.0, body="Prices fell 9.0 % (idx:NOPE@2026-01, idx:NOPE@2025-01).")
-    assert [r["result"] for r in reply["claim_results"]] == ["contradicted", "contradicted"]
+    assert [r["result"] for r in reply["claim_results"]] == [
+        "contradicted"
+    ]  # the two index IDs form one checked argument
     assert b.trust < a.trust and b.ask > a.ask
 
 

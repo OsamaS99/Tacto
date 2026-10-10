@@ -19,9 +19,10 @@ def assess(t, label=None):
         if s > unit:
             break
         firmness += 1
-    label = label or {}
+    observation = getattr(t, "observation", None)
+    label = {**(observation.labels() if observation is not None else {}), **(label or {})}
     walk_risk = 0.6 if t.status == "final_offer" else 0.15 + 0.1 * min(firmness, 3)
-    if label.get("intent") == "walk_threat":
+    if label.get("intent") == "walk_threat" or label.get("firm_final"):
         walk_risk = max(walk_risk, 0.6)
     return SupplierAssessment(
         concession=last,

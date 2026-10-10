@@ -16,6 +16,7 @@ CALLS_PER_SECOND = 9  # the arena allows 10 per key; stay just below, across all
 # A supplier's reply can take up to about a minute (its time does not count against your 60 s),
 # and a call may wait for another call on the same session first: wait long enough for both.
 TIMEOUT_S = 180.0
+READ_TIMEOUT_S = 10.0  # recovery and attachments must not inherit a supplier POST's long wait
 # Practice has a daily quota per team: every practice session start carries what is left in this
 # header, and GET /v1/me tells where the team stands.
 REMAINING_HEADER = "X-Practice-Remaining"
@@ -58,6 +59,8 @@ def classify(error):
 
 
 class ArenaClient:
+    supports_dispatch_callback = True
+
     def __init__(
         self,
         base_url=None,
@@ -66,6 +69,7 @@ class ArenaClient:
         retries=3,
         transport=None,
         timeout=TIMEOUT_S,
+        read_timeout=READ_TIMEOUT_S,
         rate=CALLS_PER_SECOND,
     ):
         base_url = (base_url or os.environ.get("ARENA_URL", "")).rstrip("/")
@@ -74,6 +78,7 @@ class ArenaClient:
         key = api_key or os.environ.get("ARENA_API_KEY")
         headers = {"X-API-Key": key} if key else {}
         self.retries, self.rate, self._lock, self._next = retries, rate, threading.Lock(), 0.0
+        self.read_timeout = min(timeout, read_timeout)
         self.practice_remaining = None  # from the last practice reply that said so
         self.http = httpx.Client(base_url=f"{base_url}/v1", headers=headers, timeout=timeout, transport=transport)
 
@@ -84,13 +89,16 @@ class ArenaClient:
         if wait > 0:
             time.sleep(wait)
 
-    def _call(self, method, path, body=None, params=None, raw=False, move_id=None):
+    def _call(self, method, path, body=None, params=None, raw=False, move_id=None, *, on_dispatch=None):
         # a caller's move id (persisted before the call) survives a restart; else one per call
         headers = {MOVE_ID_HEADER: move_id or uuid.uuid4().hex} if method == "POST" else {}
         for attempt in range(self.retries + 1):
             self._pace()
             try:
-                r = self.http.request(method, path, json=body, params=params, headers=headers)
+                if on_dispatch:
+                    on_dispatch(time.monotonic())
+                options = {"timeout": self.read_timeout} if method == "GET" else {}
+                r = self.http.request(method, path, json=body, params=params, headers=headers, **options)
             except httpx.TransportError:
                 if attempt == self.retries:
                     raise
@@ -126,11 +134,11 @@ class ArenaClient:
     def open_session(self, case_id):
         return self._call("POST", "/sessions", {"case_id": case_id})
 
-    def send_message(self, session_id, supplier_id, message, move_id=None):
+    def send_message(self, session_id, supplier_id, message, move_id=None, *, on_dispatch=None):
         """Your e-mail to one supplier; returns its reply (or the result, if `action` closes).
         `move_id`: repeat a request with its id and the arena answers it once, not twice."""
         path = f"/sessions/{session_id}/threads/{supplier_id}/messages"
-        return self._call("POST", path, {"message": message}, move_id=move_id)
+        return self._call("POST", path, {"message": message}, move_id=move_id, on_dispatch=on_dispatch)
 
     def thread(self, session_id, supplier_id):
         return self._call("GET", f"/sessions/{session_id}/threads/{supplier_id}")

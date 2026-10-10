@@ -6,6 +6,60 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
+class TurnContext:
+    """Canonical receipt times from the runner, never reset by interpretation or document loads.
+
+    decision_deadline already excludes the dispatch margin; all model work shares that budget.
+    """
+
+    session_id: str | None = None
+    observed_at: float = 0.0
+    due_at: dict[str, float] = field(default_factory=dict)
+    revisions: dict[str, int] = field(default_factory=dict)
+    wave_deadline: float | None = None
+    decision_deadline: float | None = None
+    closing: bool = False
+    in_flight: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NegotiationBrief:
+    """Private, source-backed preparation; hypotheses never become public claims."""
+
+    facts: tuple[dict, ...] = ()
+    interests: tuple[dict, ...] = ()
+    risks: tuple[str, ...] = ()
+    lever_priority: tuple[str, ...] = ()
+    questions: tuple[str, ...] = ()
+    permitted_disclosures: tuple[str, ...] = ()
+    playbook: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SupplierObservation:
+    message_id: str
+    fingerprint: str
+    intent: str = "hold"
+    firmness: int = 1
+    cash_pressure: bool = False
+    values: tuple[str, ...] = ()
+    conditional_trades: tuple[dict, ...] = ()
+    dependencies: tuple[dict, ...] = ()
+    answered: tuple[str, ...] = ()
+    refused: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+    source: str = "rules"
+
+    def labels(self):
+        return {
+            "intent": self.intent,
+            "firm_final": self.firmness == 3,
+            "cash_pressure": self.cash_pressure,
+            "values": list(self.values),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Claim:
     """One checkable argument: the exact sentence (ID and figure in it) the arena verifies."""
 
@@ -69,7 +123,7 @@ class SupplierThreadState:
     missing: list[str]
     rounds_used: int  # our messages so far
     moves_left: int
-    their_c: list[float]  # C of each of their sheets (ours, scenario mid), oldest first
+    their_c: list[float]  # C at the selected policy scenario, oldest first
     my_c: list[float]  # C of the best sheet in each of our messages, oldest first
     claim_results: list[dict] = field(default_factory=list)
     last_body: str = ""
@@ -77,6 +131,7 @@ class SupplierThreadState:
     label: dict | None = None  # Decision Selector labels for its last message (tune walk risk, never price)
     sheets: list[dict] = field(default_factory=list)  # every priced sheet of its last message, standing first
     my_sheets: list[dict] = field(default_factory=list)  # the sheets of our last message
+    observation: SupplierObservation | None = None
 
 
 @dataclass(slots=True)
@@ -93,6 +148,7 @@ class CaseState:
     c_alt: float = float("inf")
     targets: dict[str, tuple[float, float]] = field(default_factory=dict)  # sid -> (C at anchor, C we never bid beyond)
     tau: float = 0.0  # 0..1, how far the case's clock and rounds have run
+    brief: NegotiationBrief | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +173,7 @@ class CandidatePackage:
 @dataclass(frozen=True, slots=True)
 class EvaluatedPackage:
     pkg: CandidatePackage
-    c: float  # our C, scenario mid
+    c: float  # our C at the selected policy scenario
     c_high: float  # our C, pessimistic scenario
     cash_theirs: float  # what it is worth to the supplier per unit (cost.supplier_value)
 
@@ -153,6 +209,9 @@ class DisclosurePacket:
     allowed_numbers: frozenset[str]
     subject: str
     status: str = "open"  # the supplier's offer status: open | final_offer | agreed
+    questions: tuple[str, ...] = ()
+    acknowledgments: tuple[str, ...] = ("neutral",)
+    trades: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

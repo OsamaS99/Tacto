@@ -9,11 +9,12 @@ An agent is any object with `decide(case, threads) -> {"supplier_id": ..., "mess
 """
 
 import functools
+import inspect
 import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import httpx
 
@@ -37,6 +38,8 @@ PLAY_ON = {INVALID, RATE, LATE, GONE, ROUND_LIMIT, SERVER}
 MAX_INVALID, MAX_ERRORS = 2, 4  # rejected moves in a row before the closing move; one more and we stop
 # All 10 sessions of the key open: start the case again a little later, a few times.
 OPEN_RETRIES, OPEN_BACKOFF_S = 5, 3.0
+# A case that exhausts a resume attempt can reattach while its wave still has time.
+CASE_RESUME_RETRIES, CASE_RESUME_BACKOFF_S = 2, 3.0
 # Practice: the case list shows every practice case file; only those marked hosted can be played
 # (a session on another is a 403). Without the marker every listed case counts as hosted.
 HOSTED_FIELD = "hosted"
@@ -124,6 +127,10 @@ class RemoteTable:
         state = self.client.session(self.session_id)
         return state.get("result") or {"deal": False, "end_reason": state.get("end_reason"), **state}
 
+    def timing(self):
+        """Authoritative remaining buyer time; callers capture their request time first."""
+        return self.client.session(self.session_id)
+
 
 def latest(events):
     """The supplier's latest message in a thread."""
@@ -166,7 +173,10 @@ def closing_move(case, threads):
         if sheet_id and must_haves_ok(case, terms, std) and (c := total_cost(case, terms, std)) < c_alt:
             best = min(best or (c, sid, sheet_id), (c, sid, sheet_id))
     if best is None:
-        return {"supplier_id": live_threads(threads)[0], "message": {"action": {"type": "walk_away"}}}
+        return {
+            "supplier_id": (live_threads(threads) or list(threads))[0],
+            "message": {"action": {"type": "walk_away"}},
+        }
     return {"supplier_id": best[1], "message": {"action": {"type": "accept", "term_sheet_id": best[2]}}}
 
 
@@ -182,68 +192,243 @@ def refresh(table, supplier_id, known):
     return events
 
 
+def _read_retry(fn, attempts=3):
+    """Reconciliation reads survive transient failures without inventing a new move."""
+    for attempt in range(attempts + 1):
+        try:
+            return fn()
+        except (ArenaError, httpx.TransportError) as e:
+            if classify(e) not in (SERVER, RATE) or attempt == attempts:
+                raise
+            time.sleep(min(2.0, 0.25 * 2**attempt))
+
+
+def _close_decision(agent, case, threads, reason):
+    close = getattr(agent, "close_decision", None)
+    return close(case, threads, reason) if close else closing_move(case, threads)
+
+
 def play(table, case_id, agent, deadline=None):
-    """Play one case to its end. `deadline` (time.time(), or a function returning it): a Live Final
-    wave's cap - shortly before it, `closing_move` closes the case so it does not end without a deal.
-    A rejected or uncertain move is never recorded as sent: the thread is read back from the arena."""
+    """A single coordinator owns histories, deadlines and closure; workers only send HTTP.
+    Context-aware agents receive authoritative clocks; old decide(case, threads) agents still work.
+    """
+    from .buyer.records import TurnContext
+
     if hasattr(agent, "deadline"):
         agent.deadline = deadline
+    if hasattr(table, "store") and hasattr(agent, "store"):
+        agent.store = table.store
+    prepare_started = time.monotonic()
     if getattr(table, "case", None) and hasattr(agent, "prepare"):
-        agent.prepare(table.case)  # before the clock starts
-    case, threads = table.open(case_id)
-    if getattr(table, "done", None):  # resumed a case that had already ended
-        return table.done
-    for events in threads.values():
-        for m in events:
-            fetch_documents(table, m)
-    slowest = 0.0  # the longest round so far: decision + the supplier's reply
-    invalid = errors = 0  # moves rejected in a row: 422s, and all kinds
-    limited = set()  # threads at their round limit: only a close is left
-    while live_threads(threads):
-        t0, event = time.monotonic(), {}  # event: the agent's account of its decision, if it decided
-        cap = deadline() if callable(deadline) else deadline
-        if cap and time.time() > cap - max(CLOSE_BEFORE_CAP_S, slowest + ROUND_MARGIN_S):
-            log.info("%s: the wave's cap is near - closing", case_id)
-            decision = closing_move(case, threads)
-        elif invalid >= MAX_INVALID or errors >= MAX_ERRORS:
-            log.warning("%s: %d moves rejected in a row - closing", case_id, errors)
-            decision = closing_move(case, threads)
+        # Reattachment already has buyer clocks running: restore the durable brief after open,
+        # rather than spend a fresh model-backed preparation before reading those clocks.
+        if getattr(table, "resume_expected", False) and "allow_model" in inspect.signature(agent.prepare).parameters:
+            agent.prepare(table.case, allow_model=False)
         else:
-            decision = agent.decide(case, threads)
-            event = getattr(agent, "event", None) or {}
-            if decision["supplier_id"] in limited and not decision["message"].get("action"):
-                decision = closing_move(case, threads)
-        if (took := time.monotonic() - t0) > MOVE_LIMIT_S * 0.75:
-            log.warning("decision took %.1fs - the limit is %ss per message", took, MOVE_LIMIT_S)
-        if (note := getattr(table, "note", None)) is not None:  # for the table's event line
-            note.update(decision_ms=round(1000 * took), **event)
-        sid, msg = decision["supplier_id"], decision["message"]
-        try:
-            if msg.get("action"):
-                log.info("%s %s", sid, msg["action"])
-                return table.close(sid, msg)
-            reply = table.send(sid, msg)
-        except (ArenaError, httpx.TransportError) as e:
-            kind = classify(e)
-            if kind not in PLAY_ON:
-                raise
-            errors, invalid = errors + 1, invalid + (kind == INVALID)
-            if errors > MAX_ERRORS or invalid > MAX_INVALID:  # the closing move failed too
-                raise
-            log.warning("%s: %s %s", sid, kind, getattr(e, "detail", e))
-            if result := table.ended():  # e.g. the wave's cap, or the last thread ended
-                return result
-            threads[sid] = refresh(table, sid, threads[sid])  # a late answer, or our message after all
-            if kind == ROUND_LIMIT:
-                limited.add(sid)
-            continue
-        invalid = errors = 0
-        if "result" in reply:  # the reply ended the case, e.g. the last supplier walked away
-            return reply["result"]
-        threads[sid] += [{**msg, "from": "buyer"}, fetch_documents(table, reply)]
-        slowest = max(slowest, time.monotonic() - t0)
-        log.info("%s %s %s", sid, reply.get("status"), standing(threads[sid])[1])
-    return table.result()
+            agent.prepare(table.case)
+    preparation_ms = round(1000 * (time.monotonic() - prepare_started))
+    case, threads = table.open(case_id)
+    opened_at = time.monotonic()
+    if hasattr(agent, "set_turn_context"):
+        agent.session_id = getattr(table, "session_id", None)
+    if getattr(table, "done", None):
+        return table.done
+    due = {sid: opened_at + MOVE_LIMIT_S for sid in threads}
+    input_ready = {}
+
+    def sync_timing():
+        if not hasattr(table, "timing"):
+            return
+        requested = time.monotonic()
+        state = _read_retry(table.timing)
+        for sid, thread in (state.get("threads") or {}).items():
+            remaining = thread.get("seconds_left")
+            if sid in due and isinstance(remaining, int | float):
+                # Conservatively include request latency, rather than grant time on read.
+                due[sid] = requested + max(0.0, remaining)
+
+    sync_timing()  # before downloads, model work, or a resumed agent starts thinking
+    for sid, events in threads.items():
+        for message in events:
+            fetch_documents(table, message)
+        input_ready[sid] = time.monotonic()
+    slowest, invalid, errors = 0.0, 0, 0
+    limited, pending, recovering = set(), {}, set()
+    parallel = max(1, min(len(threads), getattr(table, "supplier_parallel", 1)))
+    closing_reason = None
+
+    def context(closing=False):
+        now = time.monotonic()
+        cap = deadline() if callable(deadline) else deadline
+        wave = now + cap - time.time() if cap else None
+        available = [sid for sid in live_threads(threads) if sid not in pending]
+        end = min((due[sid] for sid in available), default=now + MOVE_LIMIT_S) - 5.0
+        if wave is not None:
+            end = min(end, wave - ROUND_MARGIN_S)
+        ctx = TurnContext(
+            session_id=getattr(table, "session_id", None),
+            observed_at=now,
+            due_at=dict(due),
+            revisions={sid: len(events) for sid, events in threads.items()},
+            wave_deadline=wave,
+            decision_deadline=end,
+            closing=closing,
+            in_flight=tuple(pending),
+        )
+        if hook := getattr(agent, "set_turn_context", None):
+            hook(ctx)
+        return ctx
+
+    def note(sid, started, **extra):
+        if not hasattr(table, "note"):
+            return
+        finished = time.monotonic()
+        received = due[sid] - MOVE_LIMIT_S
+        table.note.update(
+            {
+                **(getattr(agent, "event", None) or {}),
+                "decision_ms": round(1000 * (finished - started)),
+                "decision_started_at": started,
+                "decision_finished_at": finished,
+                "receipt_at": received,
+                "input_ready_at": input_ready.get(sid, started),
+                "input_ms": round(1000 * max(0, input_ready.get(sid, started) - received)),
+                "receipt_to_decision_ms": round(1000 * max(0, started - received)),
+                "preparation_ms": preparation_ms,
+                **extra,
+            }
+        )
+
+    def error(sid, exc):
+        nonlocal invalid, errors
+        kind = classify(exc)
+        if kind not in PLAY_ON:
+            raise exc
+        errors, invalid = errors + 1, invalid + (kind == INVALID)
+        log.warning("%s: %s %s", sid, kind, getattr(exc, "detail", exc))
+        if result := _read_retry(table.ended):
+            return result
+        if errors > MAX_ERRORS or invalid > MAX_INVALID:
+            raise exc
+        threads[sid] = _read_retry(lambda: refresh(table, sid, threads[sid]))
+        input_ready[sid] = time.monotonic()
+        if kind == ROUND_LIMIT:
+            limited.add(sid)
+        sync_timing()
+        return None
+
+    def send(sid, message):
+        reply = table.send(sid, message)
+        return reply, time.monotonic()  # before attachments or coordinator scheduling
+
+    with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="supplier") as pool:
+        while live_threads(threads) or pending:
+            for sid, (future, message, started) in list(pending.items()):
+                if not future.done():
+                    continue
+                del pending[sid]
+                try:
+                    reply, received = future.result()
+                except (ArenaError, httpx.TransportError) as exc:
+                    recovering.discard(sid)
+                    if result := error(sid, exc):
+                        return result
+                    continue
+                invalid = errors = 0
+                if "result" in reply:
+                    return reply["result"]
+                due[sid] = received + MOVE_LIMIT_S
+                if sid in recovering:
+                    recovering.remove(sid)
+                    threads[sid] = _read_retry(lambda sid=sid: refresh(table, sid, threads[sid]))
+                    sync_timing()
+                else:
+                    threads[sid] += [{**message, "from": "buyer"}, fetch_documents(table, reply)]
+                input_ready[sid] = time.monotonic()
+                slowest = max(slowest, time.monotonic() - started)
+
+            cap = deadline() if callable(deadline) else deadline
+            if cap and time.time() > cap - max(CLOSE_BEFORE_CAP_S, slowest + ROUND_MARGIN_S):
+                closing_reason = closing_reason or "wave cap near"
+            if invalid >= MAX_INVALID or errors >= MAX_ERRORS:
+                closing_reason = closing_reason or "repeated rejected moves"
+
+            # Ambiguous POSTs settle under their original ID before another mutation of that thread.
+            if hasattr(table, "pending_moves"):
+                for move in table.pending_moves():
+                    if move.sid not in pending:
+
+                        def recover(sid=move.sid):
+                            return table.recover_pending(sid), time.monotonic()
+
+                        started = time.monotonic()
+                        note(move.sid, started, source="recovery")
+                        if hasattr(table, "queue_note"):
+                            table.queue_note(move.sid)
+                        recovering.add(move.sid)
+                        pending[move.sid] = (pool.submit(recover), move.payload, started)
+
+            if closing_reason:
+                if hasattr(table, "begin_closing"):
+                    table.begin_closing()
+                if pending:
+                    wait([f for f, _, _ in pending.values()], timeout=0.1, return_when=FIRST_COMPLETED)
+                    continue
+                if result := _read_retry(table.ended):
+                    return result
+                # Drain, then refresh every rival before choosing one current standing offer.
+                for sid in list(threads):
+                    threads[sid] = _read_retry(lambda sid=sid: refresh(table, sid, threads[sid]))
+                    input_ready[sid] = time.monotonic()
+                sync_timing()
+                context(True)
+                started = time.monotonic()
+                decision = _close_decision(agent, case, threads, closing_reason)
+                sid, message = decision["supplier_id"], decision["message"]
+                note(sid, started, reason=closing_reason)
+                try:
+                    return table.close(sid, message)
+                except (ArenaError, httpx.TransportError) as exc:
+                    if result := error(sid, exc):
+                        return result
+                    continue
+
+            available = [sid for sid in live_threads(threads) if sid not in pending]
+            if not available or len(pending) >= parallel:
+                if pending:
+                    wait([f for f, _, _ in pending.values()], timeout=0.1, return_when=FIRST_COMPLETED)
+                    continue
+                break
+            ctx = context()
+            started = time.monotonic()
+            if ctx.decision_deadline <= started:
+                decision = _close_decision(agent, case, threads, "buyer deadline near")
+            else:
+                decision = agent.decide(case, threads)
+            sid, message = decision["supplier_id"], decision["message"]
+            if message.get("action"):
+                closing_reason = "agent requested closure"
+                continue
+            if time.monotonic() >= ctx.decision_deadline:
+                closing_reason = "decision deadline elapsed"
+                continue
+            if any(future.done() for future, _, _ in pending.values()):
+                # A rival changed while the model was selecting: incorporate its canonical
+                # reply/error and recompute the economic reservation before any new dispatch.
+                continue
+            if sid in limited:
+                closing_reason = "round limit"
+                continue
+            if sid not in available:
+                if pending:  # an old agent unaware of in-flight requests waits for its selected thread
+                    wait([f for f, _, _ in pending.values()], timeout=0.1, return_when=FIRST_COMPLETED)
+                    continue
+                raise ValueError(f"agent selected unavailable supplier {sid}")
+            note(sid, started)
+            if hasattr(table, "queue_note"):
+                table.queue_note(sid)
+            pending[sid] = (pool.submit(send, sid, message), message, started)
+    return _read_retry(table.result)
 
 
 def hosted(cases):
@@ -258,16 +443,26 @@ def quota_used_up(error):
     return classify(error) == QUOTA
 
 
-def play_retrying(new_table, case_id, new_agent, deadline=None):
+def play_retrying(new_table, case_id, new_agent, deadline=None, resume=False):
     """`play`, started again after a short wait while the key has its 10 sessions open."""
     for attempt in range(OPEN_RETRIES + 1):
         try:
-            return play(new_table(), case_id, new_agent(), deadline)
-        except ArenaError as e:
-            if classify(e) != OPEN_SESSIONS or attempt == OPEN_RETRIES:
+            table = new_table()
+            saved = getattr(table, "has_saved_session", None)
+            table.resume_expected = resume and (attempt > 0 or bool(saved and saved(case_id)))
+            return play(table, case_id, new_agent(), deadline)
+        except (ArenaError, httpx.TransportError) as e:
+            if (
+                classify(e) not in ({OPEN_SESSIONS, SERVER, RATE} if resume else {OPEN_SESSIONS})
+                or attempt == OPEN_RETRIES
+            ):
                 raise
-            log.info("%s: %s - trying again", case_id, e.detail)
-            time.sleep(OPEN_BACKOFF_S * (attempt + 1))
+            log.info("%s: %s - trying again", case_id, getattr(e, "detail", e))
+            delay = OPEN_BACKOFF_S * (attempt + 1)
+            cap = deadline() if callable(deadline) else deadline
+            if resume and cap and time.time() + delay >= cap - ROUND_MARGIN_S:
+                raise
+            time.sleep(delay)
 
 
 def play_all(new_table, case_ids, new_agent, parallel=8):
@@ -278,10 +473,19 @@ def play_all(new_table, case_ids, new_agent, parallel=8):
     used_up = threading.Event()
 
     def one(case_id):
+        case = case_id if isinstance(case_id, dict) else None
+        case_id = case["case_id"] if case else case_id
         if used_up.is_set():
             return case_id, ArenaError(429, "not started: the practice quota is used up")
         try:
-            return case_id, play_retrying(new_table, case_id, new_agent)
+
+            def table():
+                value = new_table()
+                if case is not None:
+                    value.case = case
+                return value
+
+            return case_id, play_retrying(table, case_id, new_agent)
         except ArenaError as e:
             if quota_used_up(e):
                 used_up.set()
@@ -305,10 +509,13 @@ def play_waves(client, new_agent, waves=5, parallel=10, poll=5.0, new_table=Remo
     after `waves` waves have closed and every case has finished: {case_id: result or exception}.
     `new_table(client, case)`: the table per case (it knows the case, so the agent prepares first)."""
     started, closed, caps = {}, set(), {}  # caps: wave -> its cap as time.time()
+    resume_counts, retry_at, failed_future = {}, {}, {}
 
     def one(case, deadline):
         try:
-            return play_retrying(functools.partial(new_table, client, case), case["case_id"], new_agent, deadline)
+            return play_retrying(
+                functools.partial(new_table, client, case), case["case_id"], new_agent, deadline, resume=True
+            )
         except Exception as e:  # one broken case must not stop the others
             log.exception("%s failed", case["case_id"])
             return e
@@ -317,8 +524,12 @@ def play_waves(client, new_agent, waves=5, parallel=10, poll=5.0, new_table=Remo
         while len(closed) < waves or not all(f.done() for f in started.values()):
             try:
                 cases = client.cases("final")
-            except ArenaError as e:
-                if e.status != 403:  # 403: no wave has started yet
+            except (ArenaError, httpx.TransportError) as e:
+                if classify(e) in (SERVER, RATE):
+                    log.warning("final case list temporarily unavailable: %s", e)
+                    time.sleep(poll)
+                    continue
+                if not isinstance(e, ArenaError) or e.status != 403:  # before the first wave
                     raise
                 cases = []
             for case in cases:
@@ -327,9 +538,28 @@ def play_waves(client, new_agent, waves=5, parallel=10, poll=5.0, new_table=Remo
                     continue
                 if case.get("seconds_left") is not None:  # each wave has its own cap; follow an extension
                     caps[case["wave"]] = time.time() + case["seconds_left"]
-                if case["case_id"] not in started and case.get("seconds_left"):
-                    if case["wave"] not in {c["wave"] for c in cases if c["case_id"] in started}:
+                case_id = case["case_id"]
+                future = started.get(case_id)
+                if future is not None:
+                    if not future.done() or not isinstance(failure := future.result(), Exception):
+                        continue
+                    if classify(failure) not in {SERVER, RATE, OPEN_SESSIONS}:
+                        continue
+                    count = resume_counts.get(case_id, 0)
+                    if count >= CASE_RESUME_RETRIES:
+                        continue
+                    if failed_future.get(case_id) is not future:
+                        failed_future[case_id] = future
+                        retry_at[case_id] = time.monotonic() + CASE_RESUME_BACKOFF_S * (count + 1)
+                    if time.monotonic() < retry_at[case_id]:
+                        continue
+                    if caps.get(case["wave"], 0) - time.time() <= ROUND_MARGIN_S:
+                        continue
+                    resume_counts[case_id] = count + 1
+                    log.warning("%s reattaching after %s (attempt %s)", case_id, classify(failure), count + 1)
+                if case.get("seconds_left"):
+                    if future is None and case["wave"] not in {c["wave"] for c in cases if c["case_id"] in started}:
                         log.warning("wave %s started: %s", case["wave"], case.get("theme"))
-                    started[case["case_id"]] = pool.submit(one, case, functools.partial(caps.get, case["wave"]))
+                    started[case_id] = pool.submit(one, case, functools.partial(caps.get, case["wave"]))
             time.sleep(poll)
     return {case_id: f.result() for case_id, f in started.items()}

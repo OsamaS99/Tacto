@@ -3,21 +3,26 @@ threads, lets code decide (close, or which thread at what C with which packages 
 the model phrase it (or the template, when the model is slow, absent or wrong), and passes every
 move through the guard. Plugs into `play()` like any agent: `decide(case, threads)`."""
 
+import hashlib
+import json
 import logging
 import math
 import time
+from dataclasses import asdict, replace
 
 from ..cost import must_haves_ok
 from ..docs import standard_terms
-from ..play import MOVE_LIMIT_S, closing_move, latest, moves_left
+from ..play import MOVE_LIMIT_S, latest, moves_left
 from . import bids
-from .acceptance import decide, live
+from .acceptance import closing, decide, feasible, live
 from .economics import EconomicEvaluator, estimate_supplier
-from .guard import GuardReject, check_message, pick_claims
+from .guard import GuardReject, check_action, check_message, pick_claims
+from .interpreter import identity, interpret
+from .model import SEND_MARGIN_S
 from .playbook import playbook
-from .records import CaseState, SupplierThreadState
+from .records import CaseState, DecisionProposal, NegotiationBrief, SupplierObservation, SupplierThreadState
 from .space import ContractSpace
-from .writer import disclosure, template, write_turn
+from .writer import QUESTIONS, disclosure, template, write_turn
 
 log = logging.getLogger("arena")
 ENDED = {"walked_away", "no_bid"}
@@ -31,49 +36,126 @@ class BuyerAgent:
         self.deadline = None  # set by play(): the wave's cap (time.time()), or a function returning it
         self.seen, self.since = {}, {}  # sid -> supplier messages seen / monotonic time the last arrived
         self.labels = {}  # sid -> (supplier messages seen, Decision Selector label of the last)
+        self.session_id, self.turn_context = None, None
+        self.observations, self.questions = {}, {}
+        self._restored_session = None
         self.started_at = None  # time.time() when the case was prepared
         self.event = {}  # what the last decision was and why, for the table's event line
 
     # -- preparation (before the clock matters) -------------------------------------------------
-    def prepare(self, case):
-        from .dossier import build_dossier  # the data layer is optional: no package, no dossier
+    def prepare(self, case, *, allow_model=True):
+        from .dossier import build_dossier
+        from .writer import prep
 
         self.case_id, self.started_at = case["case_id"], time.time()
         self.dossier = build_dossier(self.package, case) if self.package else None
-        adjust = {}
-        if self.model is not None and self.dossier is not None:
-            from .writer import prep
-
-            adjust = prep(self.model, case, self.dossier) or {}
-            log.info("%s prep %s: %s", case["case_id"], self.model.last[0] or "none", adjust or "defaults")
-        self.playbook = playbook(case, adjust)
+        semantic_case = {
+            k: v
+            for k, v in case.items()
+            if k not in {"seconds_left", "open", "wave", "session_id", "status", "started_at", "ends_at", "deadline"}
+        }
+        self.brief_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "case": semantic_case,
+                    "dossier": asdict(self.dossier) if self.dossier else None,
+                    "prompt_version": "v3",
+                },
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
+        cached = self.store.case_memo(self.case_id) if self.store else {}
+        if (
+            cached.get("brief_hash") == self.brief_hash
+            and cached.get("brief")
+            and (not allow_model or not self.model or cached.get("model_attempted"))
+        ):
+            self.brief = NegotiationBrief(
+                **{k: tuple(v) if isinstance(v, list) else v for k, v in cached["brief"].items()}
+            )
+        else:
+            self.brief = prep(self.model if allow_model else None, case, self.dossier)
+            if self.store:
+                self.store.case_memo(
+                    self.case_id,
+                    brief_hash=self.brief_hash,
+                    brief=asdict(self.brief),
+                    model_attempted=bool(self.model and allow_model),
+                )
+        self.playbook = playbook(case, self.brief.playbook)
+        priority = tuple(f for f in self.brief.lever_priority if f in case["negotiable"] and f != "unit_price")
+        self.playbook = replace(
+            self.playbook, levers=tuple(dict.fromkeys((*priority, *self.playbook.levers))), send_margin_s=SEND_MARGIN_S
+        )
         self.space = ContractSpace(case)
         self.seen, self.since, self.labels = {}, {}, {}
+        self.observations, self.questions = {}, {}
+        self._restored_session = None
+
+    def set_turn_context(self, context):
+        self.turn_context = context
+        if context.session_id:
+            self.session_id = context.session_id
+        for sid, due in context.due_at.items():
+            self.since[sid] = due - MOVE_LIMIT_S
+
+    def _restore(self):
+        if not self.store or not self.session_id or self._restored_session == self.session_id:
+            return
+        saved = self.store.memo(self.session_id)
+        if saved.get("brief_hash") == self.brief_hash and saved.get("brief"):
+            value = saved["brief"]
+            self.brief = NegotiationBrief(**{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()})
+            self.playbook = replace(playbook(self.case, self.brief.playbook), send_margin_s=SEND_MARGIN_S)
+            self.playbook = replace(
+                self.playbook, levers=tuple(dict.fromkeys((*self.brief.lever_priority, *self.playbook.levers)))
+            )
+            for key, value in saved.get("observations", {}).items():
+                self.observations[key] = SupplierObservation(
+                    **{k: tuple(v) if isinstance(v, list) else v for k, v in value.items()}
+                )
+            self.questions = {sid: set(q) for sid, q in saved.get("questions", {}).items()}
+        self._restored_session = self.session_id
+
+    def _persist(self):
+        if self.store and self.session_id:
+            self.store.memo(
+                self.session_id,
+                brief_hash=self.brief_hash,
+                brief=asdict(self.brief),
+                observations={k: asdict(v) for k, v in self.observations.items()},
+                questions={sid: sorted(q) for sid, q in self.questions.items()},
+            )
 
     # -- canonical state ----------------------------------------------------------------------
     def observe(self, case, threads, now=None):
         now = self.clock() if now is None else now
+        self.case = case
+        self._restore()
         states = {}
         std = {sid: standard_terms(ev) for sid, ev in threads.items()}
         estimates = {}
         if self.playbook.relationship:
-            plain, margin = EconomicEvaluator(case, std), case["buyer"].get("sustainable_margin_pct") or 0.0
             for sid, ev in threads.items():
-                price = (latest(ev).get("term_sheets") or [{}])[0].get("terms", {}).get("unit_price")
-                if price:
+                first = next((m for m in ev if m.get("from") != "buyer" and m.get("term_sheets")), {})
+                price = (first.get("term_sheets") or [{}])[0].get("terms", {}).get("unit_price")
+                if (
+                    isinstance(price, int | float)
+                    and not isinstance(price, bool)
+                    and math.isfinite(price)
+                    and price > 0
+                ):
                     cash = bool(self.dossier and self.dossier.cash_pressure.get(sid))
-                    sheets = [
-                        m["term_sheets"][0]["terms"] for m in ev if m.get("from") != "buyer" and m.get("term_sheets")
-                    ]
-                    worth = min(plain.cash_theirs(sid, s) for s in sheets if s.get("unit_price") is not None)
-                    cap = worth * (1 - margin / 100)  # its own ask pays it at least the sustainable margin
-                    estimates[sid] = estimate_supplier(self.dossier, sid, price, cash, cap)
+                    estimates[sid] = estimate_supplier(self.dossier, sid, price, cash)
         econ = EconomicEvaluator(case, std, estimates, {sid: _quoted(ev, std[sid]) for sid, ev in threads.items()})
         for sid, ev in threads.items():
             last = latest(ev)
             n = sum(m.get("from") != "buyer" for m in ev)
             if self.seen.get(sid) != n:
-                self.seen[sid], self.since[sid] = n, now
+                self.seen[sid] = n
+                due = self.turn_context.due_at.get(sid) if self.turn_context else None
+                self.since[sid] = due - MOVE_LIMIT_S if due is not None else now
             sheets = last.get("term_sheets") or []
             theirs = [m for m in ev if m.get("from") != "buyer" and m.get("term_sheets")]
             mine = [m for m in ev if m.get("from") == "buyer" and m.get("term_sheets")]
@@ -91,14 +173,18 @@ class BuyerAgent:
                 claim_results=last.get("claim_results") or [],
                 last_body=last.get("body") or "",
                 rev=len(ev),
+                observation=self.observations.get(identity(sid, last)[1]),
                 sheets=[s["terms"] for s in sheets if (s.get("terms") or {}).get("unit_price") is not None],
                 my_sheets=[s["terms"] for s in mine[-1]["term_sheets"]] if mine else [],
             )
-        cs = CaseState(case, self.playbook, self.dossier, states, c_alt=econ.c_alt())
+        cs = CaseState(case, self.playbook, self.dossier, states, c_alt=econ.c_alt(), brief=self.brief)
         cited, cited_to = set(), {}
         for sid, ev in threads.items():
             for m in ev:
                 if m.get("from") == "buyer":
+                    self.questions.setdefault(sid, set()).update(
+                        q for q, sentence in QUESTIONS.items() if sentence in (m.get("body") or "")
+                    )
                     for ref in m.get("refs") or []:
                         (cited_to.setdefault(sid, set()) if ref.startswith(("quote:", "offer:")) else cited).add(ref)
         cs.cited, cs.cited_to = cited, cited_to
@@ -107,9 +193,17 @@ class BuyerAgent:
             first = next((m for m in ev if m.get("from") != "buyer" and m.get("term_sheets")), None)
             if opening := first and first["term_sheets"][0]["terms"].get("unit_price"):
                 openings[sid] = opening
-        market = min(openings.values(), default=None)  # a quote that breaks a must-have is a price signal too
+        market_costs = []
+        for sid in openings:
+            first = next(m for m in threads[sid] if m.get("from") != "buyer" and m.get("term_sheets"))
+            terms = first["term_sheets"][0]["terms"]
+            if must_haves_ok(case, terms, std[sid]):
+                market_costs.append(econ.c(sid, terms))
+        market_c = min(market_costs, default=None)
         for sid, opening in openings.items():
-            cs.targets[sid] = bids.targets(case, self.dossier, econ, self.space, sid, opening, cs.c_alt, market)
+            cs.targets[sid] = bids.targets(
+                case, self.dossier, econ, self.space, sid, opening, cs.c_alt, market_c=market_c
+            )
         cs.tau = self.time_used()
         return cs, econ
 
@@ -121,24 +215,31 @@ class BuyerAgent:
         return min(1.0, max(0.0, (time.time() - self.started_at) / max(cap - self.started_at, 1.0)))
 
     # -- one turn -------------------------------------------------------------------------------
-    def decide(self, case, threads):
-        """The next move; never raises - a failure closes the case on the best valid sheet instead."""
+    def decide(self, case, threads, turn_context=None):
+        """The next move; a failed optional component closes through the same financial guard."""
+        if turn_context is not None:
+            self.set_turn_context(turn_context)
         try:
             return self._decide(case, threads)
         except Exception:
             log.exception("%s: the buyer failed - closing move instead", case.get("case_id"))
             self.event = {"reason": "buyer failed: closing move", "source": "fallback"}
-            return closing_move(case, threads)
+            return self.close_decision(case, threads, reason="buyer failure")
 
     def _decide(self, case, threads):
         t0 = self.clock()
         if case["case_id"] != self.case_id:
-            self.prepare(case)
+            self.prepare(case, allow_model=False)
         cs, econ = self.observe(case, threads, t0)
-        self.label(cs)
-        order = sorted((t.sid for t in live(cs)), key=lambda s: self.since.get(s, 0.0))
+        self.label(cs, threads)
+        pending = set(self.turn_context.in_flight) if self.turn_context else set()
+        order = sorted((t.sid for t in live(cs) if t.sid not in pending), key=lambda s: self.since.get(s, 0.0))
         waiting = {s for s in order if self.clock() - self.since.get(s, t0) >= KEEP_ALIVE_S}
-        proposal = decide(cs, econ, self.space, order, waiting=waiting)
+        proposal = decide(
+            cs, econ, self.space, order, urgent=bool(self.turn_context and self.turn_context.closing), waiting=waiting
+        )
+        check_action(cs, econ, self.space, proposal)
+        self._persist()
         log.info("%s %s %s: %s", case["case_id"], proposal.kind, proposal.sid, proposal.reason)
         self.event = {"reason": proposal.reason, "source": proposal.kind}
         if proposal.kind == "accept":
@@ -149,13 +250,25 @@ class BuyerAgent:
         if proposal.kind == "walk":
             return {"supplier_id": proposal.sid, "message": {"action": {"type": "walk_away"}}}
         t = cs.threads[proposal.sid]
-        bid = max((p.terms["unit_price"] for p in proposal.packages), default=None)
+        bid = min((p.terms["unit_price"] for p in proposal.packages), default=None)
         claims = pick_claims(cs, proposal.sid, bid=bid) if proposal.packages else ()  # a keep-alive argues nothing
-        packet = disclosure(cs, t, proposal, claims)
+        if self.brief.permitted_disclosures:
+            claims = tuple(c for c in claims if c.cid in self.brief.permitted_disclosures or c.per_supplier)
+        observation = t.observation
+        blocked = set(self.questions.get(t.sid, ()))
+        if observation:
+            blocked.update((*observation.answered, *observation.refused))
+        packet = disclosure(cs, t, proposal, claims, blocked_questions=blocked)
         w0 = self.clock()
         try:
             msg, source, read = write_turn(
-                self.model, packet, self.budget(proposal.sid), case["case_id"], self.playbook.focus
+                self.model,
+                packet,
+                self.budget(proposal.sid),
+                case["case_id"],
+                self.playbook.focus,
+                deadline=self.turn_context.decision_deadline if self.turn_context else None,
+                observation=asdict(observation) if observation else None,
             )
         except Exception:  # the model's reply is untrusted input: a surprise in it costs the prose only
             log.exception("%s writer failed - template instead", case["case_id"])
@@ -181,32 +294,80 @@ class BuyerAgent:
             model=llm[0],
             llm_ms=llm[1] if source != "template" else None,
             label=t.label,
+            observation=asdict(observation) if observation else None,
+            model_trace=self.model.trace if self.model else [],
+            prompt_version="v3",
             packages=[{"terms": p.terms, "c": round(p.c, 2)} for p in proposal.packages],
         )
         return {"supplier_id": proposal.sid, "message": msg.payload()}
 
-    def label(self, cs):
-        """Decision Selector labels for each new supplier message (3 s each), while its thread
-        keeps more than 15 s of its 60."""
-        if self.decisions is None:
-            return
-        for t in live(cs):
-            n = self.seen.get(t.sid)
-            if self.labels.get(t.sid, (None,))[0] != n and self.left([t.sid]) > 15:
-                try:
-                    found = self.decisions.classify_reply(t.last_body)
-                except Exception:  # an odd answer: no label, the rules decide
-                    log.exception("%s decisions failed", cs.case["case_id"])
-                    found = None
-                self.labels[t.sid] = (n, found)
-            t.label = self.labels.get(t.sid, (None, None))[1]
+    def label(self, cs, threads, *, allow_model=True):
+        """Interpret once per reply before package generation, using one shared deadline."""
+        ordered = sorted(live(cs), key=lambda t: self.since.get(t.sid, 0))
+        pending = set(self.turn_context.in_flight) if self.turn_context else set()
+        for t in ordered:
+            if t.sid in pending:
+                continue  # a recovered send may replace this reply; do not cache a budgetless interpretation
+            message = latest(threads[t.sid])
+            _, fingerprint = identity(t.sid, message)
+            if fingerprint not in self.observations:
+                deadline = self.turn_context.decision_deadline if self.turn_context else None
+                budget = self.budget(t.sid) if t.sid not in pending else 0
+                obs = interpret(
+                    t.sid,
+                    message,
+                    model=self.model if allow_model else None,
+                    decisions=self.decisions if allow_model else None,
+                    budget_s=budget,
+                    deadline=deadline,
+                    brief=self.brief,
+                    asked=self.questions.get(t.sid, ()),
+                )
+                self.observations[fingerprint] = obs
+            obs = self.observations[fingerprint]
+            t.observation, t.label = obs, obs.labels()
+            if not t.label["values"]:
+                interests = [i for i in self.brief.interests if i["supplier_id"] == t.sid]
+                t.label["values"] = list(dict.fromkeys(f for i in interests for f in i["fields"]))
+            self.labels[t.sid] = (self.seen.get(t.sid), t.label)
+
+    def close_decision(self, case, threads, reason="closing"):
+        """Every emergency closure uses the same relationship economics and financial guard."""
+        if case["case_id"] != self.case_id:
+            self.prepare(case, allow_model=False)
+        cs, econ = self.observe(case, threads)
+        self.label(cs, threads, allow_model=False)
+        try:
+            proposal = closing(cs, econ, reason)
+            check_action(cs, econ, self.space, proposal)
+        except Exception:
+            log.exception("%s closure validation failed", case.get("case_id"))
+            options = sorted((t for t in live(cs) if feasible(cs, econ, t)), key=lambda t: econ.c(t.sid, t.standing))
+            if options:
+                t = options[0]
+                proposal = DecisionProposal("accept", t.sid, term_sheet_id=t.offer_id, reason="validated recovery")
+            else:
+                sid = next(iter(cs.threads))
+                proposal = DecisionProposal("walk", sid, reason="validated recovery: no feasible offer")
+            check_action(cs, econ, self.space, proposal)
+        self.event = {"reason": proposal.reason, "source": "closure"}
+        action = (
+            {"type": "accept", "term_sheet_id": proposal.term_sheet_id}
+            if proposal.kind == "accept"
+            else {"type": "walk_away"}
+        )
+        self._persist()
+        return {"supplier_id": proposal.sid, "message": {"action": action}}
 
     def left(self, sids):
         """Seconds until the most urgent of these threads is due (60 s from its supplier's last
         message), less the send margin."""
         now = self.clock()
-        due = min((self.since.get(s, now) for s in sids), default=now) + MOVE_LIMIT_S
-        return due - self.playbook.send_margin_s - now
+        due = min((self.since.get(s, now) + MOVE_LIMIT_S for s in sids), default=now)
+        end = due - SEND_MARGIN_S
+        if self.turn_context and self.turn_context.decision_deadline is not None:
+            end = min(end, self.turn_context.decision_deadline)
+        return max(0.0, end - now)
 
     def budget(self, sid):
         """Seconds the writer may take: the playbook's budget within what is left of this thread's 60 s."""

@@ -16,6 +16,7 @@ from ..cost import must_haves_ok
 from . import bids
 from .assess import assess, pace
 from .records import CandidatePackage, DecisionProposal
+from .space import ContractSpace
 
 LIVE = {"open", "final_offer", "agreed"}
 TAU_LATE, TAU_CLOSE = 0.6, 0.85  # share of the wave's time gone: take what is good enough / close now
@@ -26,30 +27,47 @@ def live(cs):
     return [t for t in cs.threads.values() if t.status in LIVE]
 
 
-def c_of(ev, t, scenario="mid"):
+def c_of(ev, t, scenario=None):
     if not t.offer_id or t.standing.get("unit_price") is None:
         return math.inf
     return ev.c(t.sid, t.standing, scenario)
 
 
+def unresolved(t):
+    """Explicit binding conditions remain unresolved until an official agreement."""
+    observation = getattr(t, "observation", None)
+    return t.status != "agreed" and bool(observation and observation.dependencies)
+
+
 def feasible(cs, ev, t):
-    """A sheet we may take: it exists, keeps the must-haves and beats the alternative (without an
-    alternative: any priced sheet). A standing sheet is the supplier's own price, so it does not
-    squeeze the supplier: our estimate of the relationship charge - rough by nature - must never
-    turn a deal that beats the alternative into a walk-away (case P01 walked from a better offer)."""
+    """A current unconditional standing sheet that keeps the must-haves and beats the alternative. A
+    standing sheet is the supplier's own price, so the rough relationship estimate must never turn a
+    deal that beats the alternative into a walk-away (case P01): that comparison leaves it out."""
+    if t.status not in LIVE or unresolved(t):
+        return False
     c = c_of(ev, t, "none")
     return math.isfinite(c) and must_haves_ok(cs.case, t.standing, t.std) and c <= cs.c_alt
 
 
 def floor_c(ev, t):
-    """The C a thread may still reach: an open sheet less a few more steps at its recent pace."""
+    """Project a rival on feasible terms; invalid offers are not themselves attainable deals."""
     c = c_of(ev, t)
-    return c - FLOOR_STEPS * pace(t) if t.status == "open" and t.moves_left > 0 else c
+    if unresolved(t) and (t.status != "open" or t.moves_left <= 0):
+        return math.inf
+    if not must_haves_ok(ev.case, t.standing, t.std):
+        if t.status != "open" or t.moves_left <= 0 or not math.isfinite(c):
+            return math.inf
+        space = ContractSpace(ev.case)
+        terms = bids.best_combo(ev, space, t.sid, t.standing["unit_price"], t.standing)
+        if space.valid(terms, t.std):
+            return math.inf
+        c = ev.c(t.sid, terms)
+    return c - min(FLOOR_STEPS, t.moves_left) * pace(t) if t.status == "open" and t.moves_left > 0 else c
 
 
 def dominates(ev, t, threads):
     """`t` at its pessimistic C beats every other live thread at its optimistic floor."""
-    c = c_of(ev, t, "high")
+    c = c_of(ev, t)
     return all(c <= floor_c(ev, o) for o in threads if o.sid != t.sid)
 
 
@@ -60,7 +78,7 @@ def c_open(cs):
 
 def fallback(cs, ev, t):
     """What we close on if `t` walks away: the best other valid sheet or the alternative."""
-    c = min([cs.c_alt, *(c_of(ev, o, "high") for o in live(cs) if o.sid != t.sid and feasible(cs, ev, o))])
+    c = min([cs.c_alt, *(c_of(ev, o) for o in live(cs) if o.sid != t.sid and feasible(cs, ev, o))])
     return c if math.isfinite(c) else c_open(cs)
 
 
@@ -98,6 +116,8 @@ def mirror(cs, ev, space, t, keep_stated):
     if space.valid(terms, t.std) or not (broken or c_of(ev, t) - ev.c(t.sid, terms) > eps):
         return None
     m = ev.evaluate(CandidatePackage(t.sid, terms, "mirror"))
+    if not math.isfinite(m.c) or m.c > min(cs.c_alt, cs.targets.get(t.sid, (0, cs.c_alt))[1]) + 0.01:
+        return None
     if t.my_c and t.my_c[-1] >= m.c - eps:
         return None
     return m
@@ -118,7 +138,8 @@ def alternative(cs, ev, space, t, threads):
         if space.valid(terms, t.std) or terms in t.my_sheets:
             continue
         p = ev.evaluate(CandidatePackage(t.sid, terms, "alternative"))
-        if ev.c(t.sid, terms, "none") > cs.c_alt or any(p.c_high > floor_c(ev, o) for o in threads if o.sid != t.sid):
+        cap = min(cs.c_alt, cs.targets.get(t.sid, (0, cs.c_alt))[1])
+        if p.c > cap + 0.01 or any(p.c > floor_c(ev, o) for o in threads if o.sid != t.sid):
             continue
         if p.c < c_now - epsilon(cs) and (best is None or p.c < best.c):
             best = p
@@ -145,17 +166,24 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         best = min((t for t in threads if feasible(cs, ev, t)), key=lambda t: c_of(ev, t))
         return accept(best, "agreed: take the best sheet")
     late = cs.tau >= TAU_LATE
+    if late and any(feasible(cs, ev, t) for t in threads):
+        return closing(cs, ev, "late: best available sheet")
     rivals = keep_alive(cs, ev, threads)
     for sid in order:
         t = cs.threads[sid]
         if t.status not in LIVE:
             continue
         a = assess(t, getattr(t, "label", None))
+        if unresolved(t):
+            if t.status == "open" and t.moves_left > 1 and (t.rounds_used == 0 or sid in waiting):
+                return DecisionProposal("send", sid, question="variant", reason="clarify unresolved binding conditions")
+            continue
         c_now = c_of(ev, t)
         takeable = feasible(cs, ev, t) and dominates(ev, t, threads)
         alt = None if late else alternative(cs, ev, space, t, threads)  # late: no round to spare
         if t.status == "final_offer":
-            p = max(pb.p_walk, a.walk_risk if a.intent == "walk_threat" else 0.0)
+            labels = t.observation.labels() if t.observation is not None else t.label or {}
+            p = max(pb.p_walk, a.walk_risk if a.intent == "walk_threat" or labels.get("firm_final") else 0.0)
             risk = p * max(0.0, fallback(cs, ev, t) - c_now)  # what a walk would cost us
             if alt and (1 - p) * (c_now - alt.c) > risk:  # any answer but accept may push it to walk
                 return DecisionProposal("send", t.sid, (alt,), reason="final offer: its own cheaper alternative")
@@ -164,7 +192,7 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
                 if m and pb.mirror_final and (1 - p) * (c_now - m.c) > risk:
                     return DecisionProposal("send", t.sid, (m,), reason="final offer: its price on our open terms")
                 return accept(t, "final offer: best sheet")
-            if m and not feasible(cs, ev, t) and m.c_high <= min(cs.c_alt, fallback(cs, ev, t)):
+            if m and not feasible(cs, ev, t) and m.c <= min(cs.c_alt, fallback(cs, ev, t)):
                 # its terms break a must-have or lose to the alternative: our terms at its price risk nothing
                 return DecisionProposal("send", t.sid, (m,), reason="final offer: not takeable, its price on our terms")
             if any(o.status == "open" for o in threads):  # a better thread may still move: never push it
@@ -182,6 +210,10 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         c_target, c_res = cs.targets[sid]
         # never bid a supplier up past a sheet another one already offers us
         c_res = min([c_res, *(c_of(ev, o) for o in threads if o.sid != sid and feasible(cs, ev, o))])
+        if (t.moves_left <= 1 or t.rounds_used >= pb.max_rounds) and feasible(cs, ev, t):
+            return closing(cs, ev, "rounds nearly exhausted: best available sheet")
+        if t.my_c and t.my_c[-1] > c_res + eps:
+            continue  # a better rival revised our limit: do not re-send an uneconomic prior offer
         c_best = min(c_now, alt.c) if alt else c_now
         ours_at_theirs = ev.c(sid, bids.best_combo(ev, space, sid, their_price))
         if t.my_c and ours_at_theirs <= t.my_c[-1] + eps:
@@ -200,7 +232,12 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
                 return DecisionProposal("send", t.sid, (m,), reason="close: its price on our terms")
             return accept(t, "as good as our next bid" if c_now <= next_c + eps else "time is up")
         demand = partial(space.demand, ref={**ev.standard(sid), **t.standing}, std=t.std)
-        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, their_price)
+        packages = bids.select(
+            bids.generate(ev, space, sid, next_c, their_price, t.standing),
+            demand,
+            values=a.values,
+            reference={**ev.standard(sid), **t.standing},
+        )
         # never the same terms at a lower price than we showed before: that reads as a step back
         packages = [p for p in packages if not any(_cut(p.terms, s) for s in t.my_sheets)] or packages
         if packages:

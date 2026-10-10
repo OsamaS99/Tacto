@@ -108,7 +108,12 @@ def test_a_restart_resends_pending_moves_with_their_ids(sim, tmp_path):
     store = Store(tmp_path)  # the restarted run: the 409 names no session, the session list does
     again = DurableTable(Final(client), case, store=store)
     _, threads = again.open("case:S01")
-    assert again.session_id == sid and store.load(sid) == []
+    assert again.session_id == sid and len(store.load(sid)) == 2
+    assert ours(threads[SUP]) == 1  # opening does not synchronously replay mutations
+    while again.pending_moves(SUP):
+        again.recover_pending(SUP)
+    threads[SUP] = again.thread(SUP)
+    assert store.load(sid) == []
     assert ours(threads[SUP]) == 2 == state.sessions[sid]["threads"][SUP]["round"]  # each played once
 
 

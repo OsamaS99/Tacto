@@ -242,7 +242,7 @@ def test_play_closes_before_the_cap(sim):
     assert client.session(client.sessions()[0]["session_id"])["rounds"] == 0
 
 
-def test_a_late_accept_is_read_and_played_on(sim):
+def test_a_late_accept_is_refreshed_and_closed_without_another_agent_turn(sim):
     url, _, clock = sim
 
     class LateAccept:
@@ -257,8 +257,11 @@ def test_a_late_accept_is_read_and_played_on(sim):
             return {"supplier_id": sid, "message": {"action": {"type": "accept", "term_sheet_id": sheet_id}}}
 
     agent = LateAccept()
-    result = play(RemoteTable(team(url)), "case:S01", agent)
-    assert result["deal"] and agent.calls == 2
+    client = team(url)
+    table = RemoteTable(client)
+    result = play(table, "case:S01", agent)
+    assert result["deal"] and agent.calls == 1
+    assert len(client.thread(table.session_id, result["supplier_id"])["timeouts"]) == 1
 
 
 def test_quota_header_team_view_and_the_quota_429(sim, monkeypatch):

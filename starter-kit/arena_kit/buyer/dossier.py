@@ -10,6 +10,7 @@ import logging
 import math
 from collections import defaultdict
 
+from ..cost import must_haves_ok
 from .records import Claim, EvidenceDossier
 
 log = logging.getLogger("arena")
@@ -42,6 +43,8 @@ def _records(sid):
 
 def _n(v):
     """A number, or None for '' / None / text (CSV rows use '' for NULL)."""
+    if isinstance(v, bool):
+        return None
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -116,7 +119,10 @@ class _Data:
         return 1.0
 
     def in_case_unit(self, value, pu):
-        return value * self.pu / (_n(pu) or self.pu)
+        unit = self.pu if pu in (None, "") else _n(pu)
+        if unit is None or unit <= 0:
+            raise ValueError("invalid price unit")
+        return value * self.pu / unit
 
     def part_name(self, part):
         if len(self.parts) == 1:
@@ -234,7 +240,9 @@ def should_cost(x, ceiling, d):
         unit = _n(f.get("unit_cost"))
         if f.get("part") not in x.parts or not unit:
             continue
-        owner = owners.get(ref) or (f"sup:{ref.rsplit('-', 1)[1]}" if "-" in ref else "")
+        owner = f.get("supplier") or f.get("supplier_id") or owners.get(ref) or ""
+        if owners.get(ref) and owner and _sup(owners[ref]) != _sup(owner):
+            continue  # conflicting ownership is not permission to cite another plant's costs
         sid = next((s for s in x.sids if _sup(s) == _sup(owner)), None)
         if owner and sid is None:
             continue  # another supplier's plant
@@ -244,7 +252,7 @@ def should_cost(x, ceiling, d):
             continue
         text = (
             f"Our bottom-up should-cost estimate {ref} for {x.part_name(f['part'])} is {unit:.2f} EUR "
-            f"{per(_n(f.get('price_unit')))}."
+            f"{per(_n(f.get('price_unit')) or x.pu)}."
         )
         out.append(Claim(ref, (ref,), text, "cost", strength(x.mode, "cost"), (sid,) if sid else (), value=value))
     return out
@@ -267,7 +275,7 @@ def quote_claims(x, ceiling):
         owner = _sup(f.get("supplier") or "")
         to = tuple(s for s in x.sids if _sup(s) != owner) or tuple(s for s in x.sids if _sup(s) == owner)
         own = all(_sup(s) == owner for s in to)
-        unit = f"{price:.2f} EUR {per(_n(f.get('price_unit')))}"
+        unit = f"{price:.2f} EUR {per(_n(f.get('price_unit')) or x.pu)}"
         text = (
             f"Your own quote {ref} for {x.part_name(f['part'])} was {unit}."
             if own
@@ -290,13 +298,14 @@ def order_claims(x, ceiling):
             prices = [_n(f.get("unit_price")) for *_, f in lines]
             if len(lines) < 2 or not all(prices):
                 continue
-            value = x.in_case_unit(max(prices), lines[0][2].get("price_unit"))
+            value = max(x.in_case_unit(p, f.get("price_unit")) for p, (_, _, f) in zip(prices, lines, strict=True))
             if ceiling is not None and value > ceiling:
                 continue
-            (_, a, fa), (_, b, _) = lines
+            (_, a, fa), (_, b, fb) = lines
             text = (
-                f"Our latest orders for {x.part_name(part)}, {a} and {b}, were placed at {prices[0]:.2f} and "
-                f"{prices[1]:.2f} EUR {per(_n(fa.get('price_unit')))}."
+                f"Our latest orders for {x.part_name(part)}: {a} was placed at {prices[0]:.2f} EUR "
+                f"{per(_n(fa.get('price_unit')) or x.pu)}, and {b} at {prices[1]:.2f} EUR "
+                f"{per(_n(fb.get('price_unit')) or x.pu)}."
             )
             out.append(Claim(f"po:{sid}:{part}", (a, b), text, "po", strength(x.mode, "po"), (sid,), value=value))
     return out
@@ -366,7 +375,15 @@ def rival_claims(cs, sid):
     out = []
     for other, t in cs.threads.items():
         price = t.standing.get("unit_price")
-        if other == sid or not t.offer_id or not price or (mine and price >= mine):
+        if (
+            other == sid
+            or not t.offer_id
+            or not price
+            or (mine and price >= mine)
+            or t.status not in ("open", "final_offer", "agreed")
+            or not must_haves_ok(cs.case, t.standing, t.std)
+            or (t.observation and t.observation.dependencies and t.status != "agreed")
+        ):
             continue
         gap = (mine - price) / mine if mine else 0.0
         text = f"Another bidder's offer {t.offer_id} for this part stands at {price:.2f} EUR."

@@ -4,8 +4,10 @@ most 3 arguments and 3 checked IDs, each ID once per case, a rival's quote or of
 supplier); the prose may not leak a number, an ID or a sentence about our position that code did
 not approve. A sentence that fails is dropped; approved claim sentences go out verbatim."""
 
+import math
 import re
 
+from .acceptance import feasible
 from .dossier import rival_claims
 from .records import PublicMessage
 
@@ -22,7 +24,9 @@ BLOCK = re.compile(
     r"|\bjustified (?:move|increase)\b|\bno (?:other|alternative) (?:supplier|source|option)s?\b"
     r"|\bonly (?:supplier|source)\b|\bsingle source\b|\bdepend(?:ent|ence)? on you\b"
     r"|\bpay(?:ing)? (?:you )?(?:on time|promptly|punctually)\b|\b(?:on-time|punctual) payment"
-    r"|\b(?:come|get) back to\b|\bwill (?:send|provide|share|forward)\b",
+    r"|\b(?:come|get) back to\b|\bwill (?:send|provide|share|forward)\b"
+    r"|\b(?:we (?:accept|agree)|agreed|exclusive|exclusivity|guarantee|future business)\b"
+    r"|\b(?:our|maximum) (?:budget|target|limit)\b",
     re.I,
 )
 # rivals: fair game in an RFQ, a leak of our alternative anywhere else
@@ -33,6 +37,12 @@ RIVAL = re.compile(
 )
 TOPIC = {"qn": "sc"}  # claim kinds that make the same point
 SMALL = {1.0, 2.0, 3.0}  # counting words ("our 2 packages") leak nothing
+SPELLED_VALUE = re.compile(
+    r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|"
+    r"sixty|seventy|eighty|ninety|hundred|thousand)(?:[- ]\w+){0,2} "
+    r"(?:days?|months?|years?|euros?|percent|per cent|units?|pieces?)\b",
+    re.I,
+)
 MAX_CLAIMS, MAX_IDS, MAX_SHEETS, MAX_SUBJECT, MAX_BODY, MAX_REFS = 3, 3, 3, 300, 8000, 20
 
 
@@ -107,12 +117,11 @@ def _clean(s, nums, dates, rfq):
     """The sentence with stray IDs removed, or None if it says what we must not."""
     s = ID_RE.sub("", s)
     s = re.sub(r"\(\s*[,;\s]*\)", "", s)
-    if BLOCK.search(s) or (not rfq and RIVAL.search(s)):
+    if BLOCK.search(s) or SPELLED_VALUE.search(s) or (not rfq and RIVAL.search(s)):
         return None
-    if any(d not in dates for d in DATE_RE.findall(s)):
-        return None
-    rest = DATE_RE.sub("", s)
-    if any(round(float(n.replace(",", "") or 0), 2) not in nums for n in NUM_RE.findall(rest)):
+    # Numerals in one dimension cannot authorize claims in another (90 payment days != 90% OTD).
+    # Approved factual sentences are protected verbatim; all remaining prose is number-free.
+    if NUM_RE.search(s) or DATE_RE.search(s):
         return None
     return s
 
@@ -153,13 +162,15 @@ def check_message(cs, econ, space, proposal, packet, msg):
             raise GuardReject(f"term sheet not approved: {s}")
         if errors := space.valid(s, t.std):
             raise GuardReject(f"invalid term sheet: {errors}")
+        _financial(cs, econ, proposal.sid, s)
         if s not in sheets:
             sheets.append(s)
     if len(sheets) > MAX_SHEETS:
         raise GuardReject("more than 3 term sheets")
     if packet.packages and not sheets:
         raise GuardReject("the approved packages were dropped")
-    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c)])
+    price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
+    claims = _cap([c for c in packet.claims if _fresh(cs, proposal.sid, c) and _favours(c, price)])
     nums, dates = _allowed(packet, claims)
     rfq = cs.playbook.mode == "rfq" or len(cs.case.get("suppliers", [])) > 1
     body, kept = scrub(msg.body or "", claims, nums, dates, rfq)
@@ -172,3 +183,51 @@ def check_message(cs, econ, space, proposal, packet, msg):
     if not subject or ID_RE.search(subject) or _clean(subject, nums, dates, rfq) != subject:
         subject = packet.subject
     return PublicMessage(subject[:MAX_SUBJECT], body, tuple(sheets), refs)
+
+
+def _financial(cs, econ, sid, terms):
+    cost = econ.c(sid, terms)
+    bound = min(
+        [
+            cs.c_alt,
+            cs.targets.get(sid, (math.inf, math.inf))[1],
+            *(econ.c(o.sid, o.standing) for o in cs.threads.values() if o.sid != sid and feasible(cs, econ, o)),
+        ]
+    )
+    if not math.isfinite(cost) or cost > bound + 0.01:
+        raise GuardReject("package exceeds current economic reservation")
+
+
+def check_action(cs, econ, space, proposal):
+    """Economic and contract checks also apply to closure, templates and emergency actions."""
+    t = cs.threads.get(proposal.sid)
+    if t is None:
+        raise GuardReject("unknown supplier")
+    if proposal.kind == "send":
+        for pkg in proposal.packages:
+            if space.valid(pkg.terms, t.std):
+                raise GuardReject("invalid proposed package")
+            _financial(cs, econ, t.sid, pkg.terms)
+    elif proposal.kind == "accept":
+        if (
+            not t.offer_id
+            or proposal.term_sheet_id != t.offer_id
+            or t.status not in ("open", "final_offer", "agreed")
+            or not feasible(cs, econ, t)
+        ):
+            raise GuardReject("acceptance must name the current feasible standing offer")
+        price = t.standing.get("unit_price")
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, int | float)
+            or not math.isfinite(price)
+            or price <= 0
+            or not math.isfinite(econ.c(t.sid, t.standing, "none"))
+            or econ.c(t.sid, t.standing, "none") > cs.c_alt
+        ):
+            raise GuardReject("acceptance loses to the alternative or has invalid economics")
+    elif proposal.kind == "walk":
+        if any(o.status in ("open", "final_offer", "agreed") and feasible(cs, econ, o) for o in cs.threads.values()):
+            raise GuardReject("a feasible standing offer beats the alternative")
+    else:
+        raise GuardReject("unknown action")

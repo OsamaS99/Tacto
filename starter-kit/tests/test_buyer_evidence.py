@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from arena_kit.buyer.dossier import build_dossier, rival_claims, strength
+from arena_kit.buyer.economics import EconomicEvaluator
 from arena_kit.buyer.guard import GuardReject, check_message, pick_claims
 from arena_kit.buyer.playbook import playbook
 from arena_kit.buyer.records import (
@@ -69,7 +70,8 @@ def package(tmp_path):
         "sc:70210@2026Q2": {"supplier": "sup:70210", "quarter": "2026Q2", "otd_pct": 95.0, "ppm": 0},
         "quote:Q1": {"supplier": "sup:70999", "part": "part:T1", "unit_price": 3890.0, "price_unit": 100},
         "cost:T1": {"part": "part:T1", "unit_cost": 3650.0, "price_unit": 100, "confidence_pct": 10},
-        "cost:T1-70999": {"part": "part:T1", "unit_cost": 3000.0, "price_unit": 100, "confidence_pct": 5},
+        "cost:T1-70999": {"supplier": "sup:70999", "part": "part:T1", "unit_cost": 3000.0,
+                          "price_unit": 100, "confidence_pct": 5},
         "po:1-10": {"supplier": "sup:71999", "part": "part:T1", "unit_price": 3980.0, "price_unit": 100,
                     "date": "2026-08-01"},
         "po:2-10": {"supplier": "sup:71999", "part": "part:T1", "unit_price": 4000.0, "price_unit": 100,
@@ -144,6 +146,41 @@ def test_should_cost_and_quotes_above_the_ask_are_not_claims(package):
     assert not kinds & {"cost", "quote", "po", "notice"}
 
 
+def test_mixed_order_units_are_normalized_independently_and_cited_with_their_own_units(package):
+    facts = {
+        "po:1-10": {**package.facts["po:1-10"], "unit_price": 10, "price_unit": 1},
+        "po:2-10": {**package.facts["po:2-10"], "unit_price": 900, "price_unit": 100},
+    }
+    dossier = build_dossier(package, {**CASE, "facts": facts})
+    claim = next(c for c in dossier.claims if c.kind == "po")
+    assert claim.value == 1000
+    assert "900.00 EUR per 100 units" in claim.sentence and "10.00 EUR per unit" in claim.sentence
+    cs = state(CASE, dossier, {"sup:70210": ("offer:A", 1100)})
+    assert claim.cid not in {c.cid for c in pick_claims(cs, "sup:70210", bid=950)}
+
+
+def test_should_cost_ownership_uses_metadata_and_never_guesses_from_an_id(package):
+    facts = {
+        "cost:arbitrary-id-999": {
+            "supplier": "sup:70210",
+            "part": "part:T1",
+            "unit_cost": 32,
+            "price_unit": 1,
+            "confidence_pct": 5,
+        }
+    }
+    dossier = build_dossier(package, {**CASE, "facts": facts})
+    assert dossier.should_cost["sup:70210"] == (3200, 5)
+    claim = next(c for c in dossier.claims if c.cid == "cost:arbitrary-id-999")
+    assert claim.suppliers == ("sup:70210",) and claim.ids == ("cost:arbitrary-id-999",)
+
+
+def test_boolean_and_nonfinite_numbers_never_become_evidence():
+    from arena_kit.buyer.dossier import _n
+
+    assert all(_n(v) is None for v in (True, False, "NaN", "inf", None, "invalid"))
+
+
 def test_pick_claims_caps_skips_cited_and_stale_figures():
     claims = [
         Claim("notice", ("doc:L1", "ctr:1"), "Notice 51 days doc:L1 ctr:1.", "notice", 5.0, ("sup:A",)),
@@ -192,9 +229,9 @@ def test_no_price_figure_above_our_bid_and_one_quality_figure_per_message():
 
 def test_check_message_drops_promises_we_never_keep():
     # case P11: "we will come back to your request" four times, flagged in every reply
-    body = "We will come back to you with the quality data. We propose 4012.50 with 90 days. We will send the PO."
+    body = "We will come back to you with the quality data. Please see the attached package. We will send the PO."
     msg, _ = guarded(body)
-    assert "come back" not in msg.body and "send" not in msg.body and "We propose 4012.50 with 90 days." in msg.body
+    assert "come back" not in msg.body and "send" not in msg.body and "Please see the attached package." in msg.body
 
 
 def guarded(body, sheets=None, case=CASE, subject="Re: clamps", model_subject=None):
@@ -206,7 +243,9 @@ def guarded(body, sheets=None, case=CASE, subject="Re: clamps", model_subject=No
     packet = DisclosurePacket(sid, "price_increase", "leverage", 3, (sheet,), (claim,), None, last, allowed, subject)
     sheets = tuple(sheets if sheets is not None else [sheet])
     msg = PublicMessage(model_subject or subject, body, sheets, ("idx:BOGUS",))
-    return check_message(cs, None, ContractSpace(case), DecisionProposal("send", sid), packet, msg), claim
+    econ = EconomicEvaluator(case)
+    cs.c_alt = econ.c_alt()
+    return check_message(cs, econ, ContractSpace(case), DecisionProposal("send", sid), packet, msg), claim
 
 
 def test_check_message_scrubs_leaks_and_keeps_claims_verbatim():
@@ -221,7 +260,7 @@ def test_check_message_scrubs_leaks_and_keeps_claims_verbatim():
     assert claim.sentence in msg.body and msg.refs == claim.ids
     assert "alternative" not in msg.body and "budget" not in msg.body and "4100" not in msg.body
     assert "po:" not in msg.body and "Please see for our view." in msg.body
-    assert "We propose 4012.50 with 90 days from 2026-11-01." in msg.body and "2027" not in msg.body
+    assert "We propose 4012.50" not in msg.body and "2027" not in msg.body
     assert msg.subject == "Re: clamps" and msg.term_sheets == ({"unit_price": 4012.5, "payment_days": 90},)
 
 

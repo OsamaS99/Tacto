@@ -19,6 +19,7 @@ import html
 import io
 import itertools
 import json
+import math
 import re
 import threading
 import time
@@ -152,16 +153,112 @@ class Sim:
         th["messages"].append(msg)
         return msg
 
-    def _answer(self, s, th, msg, sheets):
+    def _claims(self, s, th, msg):
+        """Conservative local adjudication of structured facts grouped by argument/sentence.
+
+        This deterministic checker validates public facts; it does not model whether evidence
+        persuades a hosted supplier. Context IDs do not consume the three argument slots.
+        """
+        facts = {**self.facts, **s["case"].get("facts", {}), **s["offers"]}
+        body = msg.get("body") or ""
+        units = []
+        seen_refs = set()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
+            refs = list(dict.fromkeys(ID_RE.findall(sentence)))
+            if refs:
+                units.append((sentence, refs))
+                seen_refs.update(refs)
+        remaining = [r for r in msg.get("refs", []) if r not in seen_refs]
+        if remaining:
+            units.append(("", list(dict.fromkeys(remaining))))
+        groups = []
+        for sentence, refs in units:
+            by = {}
+            for ref in refs:
+                kind = ref.split(":", 1)[0]
+                if kind in ("sup", "part"):
+                    continue
+                key = (kind, ref.split("@")[0]) if kind == "idx" else (kind, "")
+                by.setdefault(key, []).append(ref)
+            if any(k[0] == "doc" for k in by) and any(k[0] == "ctr" for k in by):
+                paired = [r for r in refs if r.startswith(("doc:", "ctr:"))]
+                groups.append((sentence, "notice", paired))
+                by = {k: v for k, v in by.items() if k[0] not in ("doc", "ctr")}
+            groups += [(sentence, k[0], v) for k, v in by.items()]
         results = []
-        for i, ref in enumerate(list(dict.fromkeys(msg.get("refs", []) + ID_RE.findall(msg.get("body", ""))))[:3]):
-            known = ref in self.facts or ref in s["case"].get("facts", {}) or ref in s["offers"]
-            # a rival's quote may be cited to every bidder: it counts once per supplier, the rest once per case
-            seen = (th["key"], ref) if ref.startswith(("quote:", "offer:")) else ref
-            result = "contradicted" if not known else "duplicate" if seen in s["used"] else "verified"
-            results.append({"index": i, "result": result})
-            if known:
-                s["used"].add(seen)
+        for sentence, kind, refs in groups[:3]:
+            keys = [(th["key"], ref) if kind in ("quote", "offer") else ref for ref in refs]
+            if any(ref not in facts for ref in refs):
+                result = "contradicted"
+            elif any(key in s["used"] for key in keys):
+                result = "duplicate"
+            else:
+                result = self._verify_claim(s, th, sentence, kind, refs, facts)
+            if result in ("verified", "irrelevant"):
+                s["used"].update(keys)
+            results.append({"index": len(results), "result": result})
+        return results
+
+    def _verify_claim(self, s, th, sentence, kind, refs, facts):
+        rows = [facts[r] for r in refs]
+        parts, supplier = s["case"].get("parts", []), f"sup:{th['key']}"
+        for row in rows:
+            if row.get("part") and row["part"] not in parts:
+                return "irrelevant"
+            owner = row.get("supplier") or row.get("supplier_id")
+            if kind not in ("quote", "offer", "idx", "fc", "cost") and owner and owner != supplier:
+                return "irrelevant"
+        clean = ID_RE.sub("", sentence)
+        clean = re.sub(r"\b\d{4}-\d{2}(?:-\d{2})?\b", "", clean)
+        nums = [float(n.replace(",", "")) for n in re.findall(r"[+-]?\d+(?:,\d{3})*(?:\.\d+)?", clean)]
+        expected = []
+        percent = kind in ("idx", "fc") or (
+            kind == "sc" and not re.search(r"ppm|quality|defect|complaint", clean, re.I)
+        )
+        if kind == "idx" and len(rows) == 2:
+            ordered = sorted(
+                zip(refs, rows, strict=True), key=lambda item: item[1].get("month") or item[0].split("@")[-1]
+            )
+            (a_ref, a), (b_ref, b) = ordered
+            a_month, b_month = a.get("month") or a_ref.split("@")[-1], b.get("month") or b_ref.split("@")[-1]
+            try:
+                distance = (int(b_month[:4]) - int(a_month[:4])) * 12 + int(b_month[5:7]) - int(a_month[5:7])
+                latest = max((f.get("month", "") for r, f in facts.items() if r.startswith("idx:")), default=b_month)
+                age = (int(latest[:4]) - int(b_month[:4])) * 12 + int(latest[5:7]) - int(b_month[5:7])
+                if not 0 < distance <= 12 or age > 11 or a.get("series") != b.get("series"):
+                    return "irrelevant"
+                expected = [(float(b["value"]) / float(a["value"]) - 1) * 100]
+            except (TypeError, ValueError, ZeroDivisionError, KeyError):
+                return "contradicted"
+        elif kind == "idx":
+            return "irrelevant" if nums else "verified"  # a bare index ID is context, not a claimed change
+        elif kind == "notice":
+            expected = [float(row["days"]) for row in rows if row.get("days") is not None]
+        elif kind in ("sc", "qn"):
+            field = "ppm" if kind == "qn" or re.search(r"ppm|quality|defect|complaint", clean, re.I) else "otd_pct"
+            values = [float(row[field]) for row in rows if row.get(field) is not None]
+            expected = [sum(values) / len(values)] if values else []
+        else:
+            field = {
+                "quote": "unit_price",
+                "offer": "unit_price",
+                "po": "unit_price",
+                "cost": "unit_cost",
+                "fc": "change_pct",
+            }.get(kind)
+            expected = [float(row[field]) for row in rows if field and row.get(field) is not None]
+        if kind == "po" and (not 2 <= len(rows) <= 8 or len({row.get("part") for row in rows}) != 1):
+            return "irrelevant"
+        if nums and expected:
+            if not all(
+                any(abs(n - value) <= (0.5 if percent else max(0.01, abs(value) * 0.005)) for n in nums)
+                for value in expected
+            ):
+                return "contradicted"
+        return "verified"
+
+    def _answer(self, s, th, msg, sheets):
+        results = self._claims(s, th, msg)
         files = ["cost-breakdown.xlsx"] if "breakdown" in msg.get("body", "").lower() else []
         price = round(max(th["opening"] * FLOOR, th["stated"]["unit_price"] - th["opening"] * STEP), 2)
         best = max(sheets, key=lambda t: t["unit_price"]) if sheets else None
@@ -229,7 +326,7 @@ class Sim:
         }
         for i, sup in enumerate(case["suppliers"]):
             opening = round((current or case["buyer"]["fallback_unit_price"]) * (1 + OPEN_UP + 0.02 * i), 2)
-            standard = {f: (case["term_options"].get(f) or [None])[0] for f in case["negotiable"][1:]}
+            standard = {f: (case["term_options"].get(f) or [None])[0] for f in case["negotiable"] if f != "unit_price"}
             th = s["threads"][sup] = {
                 "key": sup.split(":", 1)[1],
                 "round": 0,
@@ -297,26 +394,55 @@ class Sim:
 
     def _end(self, s, reason, sup):
         case, ths = s["case"], s["threads"]
-        c_open = min(total_cost(case, {"unit_price": th["opening"]}, th["standard"]) for th in ths.values())
-        # the best this script would ever accept: its floor price, any allowed values of the other terms
-        options = [case["term_options"].get(f) or [None] for f in case["negotiable"][1:]]
-        c_best = (
-            self.supplier.best_cost(s)
-            if self.supplier
-            else min(
-                total_cost(
-                    case,
-                    {
-                        **dict(zip(case["negotiable"][1:], combo, strict=True)),
-                        "unit_price": round(th["opening"] * FLOOR, 2),
-                    },
-                )
-                for th in ths.values()
-                for combo in itertools.product(*options)
-            )
-        )
+
+        def evaluated(th, terms):
+            p = th.get("persona")
+            supplier = p.economics(case, terms) if p else None
+            return total_cost(case, terms, th["standard"], supplier)
+
+        openings = [
+            evaluated(th, {"unit_price": th["opening"]})
+            for th in ths.values()
+            if must_haves_ok(case, {"unit_price": th["opening"]}, th["standard"])
+        ]
+        c_open = min(openings, default=None)
+        fields = [f for f in case["negotiable"] if f != "unit_price"]
+        if self.supplier:
+            c_best = self.supplier.best_cost(s)
+        else:
+            costs = []
+            for th in ths.values():
+                choices = []
+                for f in fields:
+                    opts = list(case["term_options"].get(f) or [])
+                    standard = th["standard"].get(f)
+                    if standard not in opts:
+                        opts.append(standard)
+                    choices.append(opts)
+                for combo in itertools.product(*choices):
+                    terms = {**dict(zip(fields, combo, strict=True)), "unit_price": round(th["opening"] * FLOOR, 2)}
+                    if must_haves_ok(case, terms, th["standard"]):
+                        costs.append(evaluated(th, terms))
+            c_best = min(costs, default=math.inf)
         alt = case["buyer"].get("alternative") or {}
-        c_alt = total_cost(case, alt["terms"]) if alt.get("terms", {}).get("unit_price") else None
+        alt_terms = alt.get("terms") or {}
+        alt_fact = {**self.facts, **case.get("facts", {})}.get(alt.get("ref"), {})
+        alt_sid = alt.get("supplier_id") or alt.get("supplier") or alt_fact.get("supplier")
+        if not alt_sid and alt.get("kind") == "current_contract" and len(ths) == 1:
+            alt_sid = next(iter(ths))
+        alt_th = ths.get(alt_sid)
+        c_alt = (
+            (evaluated(alt_th, alt_terms) if alt_th else total_cost(case, alt_terms))
+            if alt_terms.get("unit_price")
+            else None
+        )
+        if c_alt is not None:
+            c_best = min(c_best, c_alt)
+        scoring_valid = c_open is not None and math.isfinite(c_best)
+
+        def scored(cost):
+            return score(c_open, cost, c_best) if scoring_valid else None
+
         r = {
             "ended": True,
             "deal": False,
@@ -326,8 +452,9 @@ class Sim:
             "c_open": c_open,
             "c_deal": None,
             "c_alt": c_alt,
-            "c_best": c_best,
-            "score": score(c_open, c_alt, c_best) if c_alt else 0.0,
+            "c_best": c_best if math.isfinite(c_best) else None,
+            "scoring_valid": scoring_valid,
+            "score": scored(c_alt) if c_alt is not None else (0.0 if scoring_valid else None),
             "must_haves_ok": None,
             "cost_breakdown": None,
             "trace": [],
@@ -339,11 +466,13 @@ class Sim:
                 supplier_id=sup,
                 offer_id=ths[sup]["offer_id"],
                 terms=t,
-                c_deal=total_cost(case, t),
+                c_deal=evaluated(ths[sup], t),
                 must_haves_ok=must_haves_ok(case, t),
-                cost_breakdown=cost_breakdown(case, t),
+                cost_breakdown=cost_breakdown(
+                    case, t, supplier=ths[sup]["persona"].economics(case, t) if ths[sup].get("persona") else None
+                ),
             )
-            r["score"] = score(c_open, r["c_deal"], c_best) if r["must_haves_ok"] else 0.0
+            r["score"] = scored(r["c_deal"]) if r["must_haves_ok"] else 0.0
         s.update(status="ended", end_reason=reason, result=r)
         for th in ths.values():
             th["closed"] = th["closed"] or reason

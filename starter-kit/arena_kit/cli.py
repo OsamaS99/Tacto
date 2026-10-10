@@ -39,6 +39,8 @@ def agent_factory(name, data, llm=True):
         from .buyer import make_buyer_factory
 
         return make_buyer_factory(data, llm)
+    if not llm:
+        return NaiveAgent  # the legacy model baseline's deterministic fallback; no provider calls
     package = None
     if data:
         from .data import DataPackage
@@ -103,9 +105,12 @@ def main(argv=None):
     e.add_argument("--clock", action="store_true", help="the 60-second rule and a wave's cap, as in the final")
     e.add_argument("--parallel", type=int, default=3, help="cases at once")
     e.add_argument("--data", **data)
-    e.add_argument("--llm", action="store_true", help="let the buyer (and a persona) call the model")
+    e.add_argument("--llm", action="store_true", help="alias for --buyer-llm")
+    e.add_argument("--buyer-llm", action="store_true", help="enable buyer model calls")
+    e.add_argument("--supplier-llm", action="store_true", help="enable persona model calls independently")
     e.add_argument("--supplier", default="script", choices=["script", "persona"], help="the simulated supplier")
     e.add_argument("--seed", type=int, default=0, help="persona: its hidden economics and dice")
+    e.add_argument("--seeds", help="comma-separated persona seeds (overrides --seed)")
     z = sub.add_parser("analyze", help="read buyer run logs (runs/...) and name what went wrong")
     z.add_argument("paths", nargs="+", help="events/session files or folders")
     sub.add_parser("me", help="your team: practice quota used and left, best score per case")
@@ -136,7 +141,8 @@ def main(argv=None):
         names = [n.strip() for n in args.agents.split(",") if n.strip()]
         if unknown := set(names) - set(AGENTS):
             raise SystemExit(f"unknown agents: {sorted(unknown)}")
-        factories = {n: agent_factory(n, args.data, args.llm) for n in names}
+        buyer_llm = args.buyer_llm or args.llm
+        factories = {n: agent_factory(n, args.data, buyer_llm) for n in names}
         facts, supplier = None, None
         if args.supplier == "persona":  # its economics come from the data; cited IDs are checked against it
             from .data import DataPackage
@@ -144,9 +150,25 @@ def main(argv=None):
 
             package = DataPackage(args.data) if args.data else None
             facts = package.facts if package else None
-            supplier = PersonaSupplier(package, args.seed, persona_model() if args.llm else None)
+            supplier = PersonaSupplier(package, args.seed, persona_model() if args.supplier_llm else None)
         folder = cases_folder(args.cases)
-        out = evaluate(factories, folder, args.repeat, args.clock, max(1, args.parallel), facts, supplier=supplier)
+        try:
+            seeds = [int(seed.strip()) for seed in args.seeds.split(",")] if args.seeds else [args.seed]
+        except ValueError:
+            raise SystemExit("--seeds must contain comma-separated integers") from None
+        if not seeds:
+            raise SystemExit("--seeds must contain at least one integer")
+        out = evaluate(
+            factories,
+            folder,
+            args.repeat,
+            args.clock,
+            max(1, args.parallel),
+            facts,
+            supplier=supplier,
+            seeds=seeds,
+            metadata={"buyer_llm": buyer_llm, "supplier_llm": args.supplier_llm},
+        )
         print(report(out))
         return
     if args.cmd == "analyze":  # offline: the run's files, never the arena
@@ -181,7 +203,9 @@ def main(argv=None):
             else:
                 print(f"{name}: public from {info.get('at')}")
     elif args.cmd == "play":
-        table = table_factory(args.agent)(client)
+        set_name = "sandbox" if args.case_id.startswith("case:D") else "practice"
+        case = next((c for c in client.cases(set_name) if c["case_id"] == args.case_id), None)
+        table = table_factory(args.agent)(client, case)
         try:
             result = play(table, args.case_id, agent_factory(args.agent, args.data)())
         except ArenaError as e:  # e.g. not hosted, the quota, a paused key: the arena says why
@@ -194,11 +218,11 @@ def main(argv=None):
         new_agent, new_table = agent_factory(args.agent, args.data), table_factory(args.agent)
         out = play_waves(client, new_agent, args.waves, min(args.parallel, 10), new_table=new_table)
     else:
-        ids = [case["case_id"] for case in hosted(client.cases(args.set))]
+        cases = hosted(client.cases(args.set))
         new_table = table_factory(args.agent)
         out = play_all(
             lambda: new_table(client),
-            ids,
+            cases,
             agent_factory(args.agent, args.data),
             min(args.parallel, 10),
         )

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,26 @@ from arena_kit.play import hosted, quota_used_up
 from arena_kit.sim import Sim
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_client_reads_have_short_timeout_and_dispatch_is_recorded_after_pacing():
+    requests, dispatches = [], []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = ArenaClient("http://arena.test", transport=httpx.MockTransport(handle), rate=1000)
+    client.me()
+    paced = []
+    client._pace = lambda: paced.append(time.monotonic())
+    client.send_message("session", "sup:A", {"body": "Hello"}, move_id="same-id", on_dispatch=dispatches.append)
+    assert requests[0].extensions["timeout"]["read"] == 10
+    assert requests[1].extensions["timeout"]["read"] == 180
+    assert requests[1].headers["X-Move-Id"] == "same-id"
+    assert len(dispatches) == 1 and dispatches[0] >= paced[0]
+
+
 CASE = {
     "case_id": "case:T01", "set": "practice", "type": "rfq", "title": "Test RFQ",
     "briefing": "Two suppliers quote a pump housing.", "trigger_doc": None,

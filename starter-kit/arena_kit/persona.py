@@ -19,7 +19,7 @@ import random
 import re
 from dataclasses import dataclass, field
 
-from .cost import closing_terms, supplier_value, total_cost
+from .cost import closing_terms, must_haves_ok, supplier_value, total_cost
 from .sim import NAMES, _fmt
 
 AS_OF, RECENT = "2026-09-30", "2025-10-01"  # the data's date; notes older than a year are stale
@@ -106,6 +106,7 @@ class Persona:
     reality: float  # chance that true data meets "that's not our reality"
     base: dict  # its standard terms with the fixed ones: what it values against
     rng: random.Random
+    full_cost: float = 0.0
     ask: float = 0.0
     trust: float = 1.0
     hard: float = 0.0
@@ -117,21 +118,34 @@ class Persona:
     promised: bool = False
     notes: list = field(default_factory=list)
 
-    def extra(self, case, terms):
+    def extra(self, case, terms, security=True):
         """EUR per unit beyond `supplier_value`'s cash items: lead time, volume, contract, index, quality."""
         t, s, ref = closing_terms(case, terms, self.base), closing_terms(case, {}, self.base), self.opening
         x = -ref * LEAD_COST * max(0, s["lead_time_days"] - t["lead_time_days"]) * CAPACITY_LEAD[self.capacity]
         more = t["volume_per_year"] / s["volume_per_year"] - 1 if s["volume_per_year"] else 0.0
         x += ref * VOLUME_GAIN * max(-0.5, min(0.5, more)) * CAPACITY_VOLUME[self.capacity]
-        x += ref * CONTRACT_GAIN * (t["contract_months"] - s["contract_months"]) / 12 * (1.5 if self.cash else 1)
+        if security:
+            x += ref * CONTRACT_GAIN * (t["contract_months"] - s["contract_months"]) / 12 * (1.5 if self.cash else 1)
         share = (t.get("index_clause") or {}).get("material_share", 0) - (s.get("index_clause") or {}).get(
             "material_share", 0
         )
-        x += ref * INDEX_GAIN * share
+        if security:
+            x += ref * INDEX_GAIN * share
         commit = t.get("ppm_commitment")
         if commit is not None and self.ppm > commit:  # it would have to invest to keep that
             x -= ref * QUALITY_COST * (self.ppm - commit) / self.ppm
         return x
+
+    def economics(self, case, terms):
+        """Hidden cash economics for scoring; security preferences are not cash margin."""
+        return {
+            "standard": self.base,
+            "full_cost": self.full_cost,
+            "interest_rate": self.rate,
+            "usual_rate": BASE_RATE,
+            "ppm": self.ppm,
+            "extra": self.extra(case, terms, security=False),
+        }
 
     def value(self, case, terms):
         est = {"standard": self.base, "interest_rate": self.rate, "usual_rate": BASE_RATE, "ppm": self.ppm}
@@ -185,7 +199,7 @@ def _standard(case, master, ppm):
         "lead_time_days": master.get("standard_lead_time_days"),
     }
     out = {}
-    for f in case["negotiable"][1:]:
+    for f in (f for f in case["negotiable"] if f != "unit_price"):
         opts = case["term_options"].get(f) or [None]
         if own.get(f):
             out[f] = int(own[f]) if f.endswith("days") else own[f]
@@ -266,6 +280,7 @@ def persona(package, case, sup, rng):
         reality=min(0.9, rng.uniform(0.3, 0.6) + 0.2 * cash),
         base={**base, **case.get("fixed_terms", {})},
         rng=rng,
+        full_cost=cost,
         trust=0.85 if note["overdue"] else 1.0,
     )
     # floor and ask are values (EUR per unit at its standard terms); the opening is stated at those terms
@@ -366,7 +381,7 @@ class PersonaSupplier:
 
     def best_cost(self, s):
         """C of the best deal any supplier here would sign: its floor, the buyer's best other terms."""
-        case, fields, out = s["case"], s["case"]["negotiable"][1:], math.inf
+        case, fields, out = s["case"], [f for f in s["case"]["negotiable"] if f != "unit_price"], math.inf
         for th in s["threads"].values():
             p = th["persona"]
             choices = []
@@ -377,7 +392,26 @@ class PersonaSupplier:
                 terms = dict(zip(fields, combo, strict=True))
                 price = p.price_for(case, terms, p.floor)
                 if price and price > 0:
-                    out = min(out, total_cost(case, {**terms, "unit_price": price}))
+                    package = {**terms, "unit_price": price}
+                    if not must_haves_ok(case, package, th["standard"]):
+                        continue
+
+                    def cost_at(unit_price, terms=terms, th=th, p=p):
+                        candidate = {**terms, "unit_price": unit_price}
+                        return total_cost(case, candidate, th["standard"], p.economics(case, candidate))
+
+                    # Relationship cost can make a healthy price above the floor cheaper.
+                    if case["buyer"].get("category_goal") in ("stabilise", "secure_supply"):
+                        lo, hi = price, max(price * 2, p.opening * 2)
+                        for _ in range(40):
+                            a, b = lo + (hi - lo) * 0.382, lo + (hi - lo) * 0.618
+                            if cost_at(a) <= cost_at(b):
+                                hi = b
+                            else:
+                                lo = a
+                        optimum = round((lo + hi) / 2, 2)
+                        out = min(out, *(cost_at(max(price, optimum + delta)) for delta in (-0.01, 0, 0.01)))
+                    out = min(out, cost_at(price))
         return out
 
     # -- the e-mail ----------------------------------------------------------------------------

@@ -8,11 +8,18 @@ from pathlib import Path
 import pytest
 
 from arena_kit.buyer import bids
-from arena_kit.buyer.acceptance import TAU_CLOSE, TAU_LATE, decide, epsilon
+from arena_kit.buyer.acceptance import TAU_CLOSE, TAU_LATE, decide, epsilon, feasible, floor_c
 from arena_kit.buyer.assess import assess
-from arena_kit.buyer.economics import EconomicEvaluator
+from arena_kit.buyer.economics import EconomicEvaluator, estimate_supplier
 from arena_kit.buyer.playbook import playbook
-from arena_kit.buyer.records import CaseState, SupplierEstimate, SupplierThreadState
+from arena_kit.buyer.records import (
+    CandidatePackage,
+    CaseState,
+    EvidenceDossier,
+    SupplierEstimate,
+    SupplierObservation,
+    SupplierThreadState,
+)
 from arena_kit.buyer.space import ContractSpace
 from arena_kit.cost import must_haves_ok, total_cost
 
@@ -58,13 +65,13 @@ def thread(ev, sid="sup:A", prices=(110.0,), mine=(), status="open", moves_left=
     )
 
 
-def state(case, threads, ev, tau=0.0, pb=None, opening=110.0, market=None):
+def state(case, threads, ev, tau=0.0, pb=None, opening=110.0, market=None, market_c=None):
     """The case state with each supplier's targets; `opening`: its first price (or {sid: price})."""
     space = ContractSpace(case)
     cs = CaseState(case, pb or playbook(case), None, {t.sid: t for t in threads}, c_alt=ev.c_alt(), tau=tau)
     for t in threads:
         first = opening[t.sid] if isinstance(opening, dict) else opening
-        cs.targets[t.sid] = bids.targets(case, None, ev, space, t.sid, first, cs.c_alt, market)
+        cs.targets[t.sid] = bids.targets(case, None, ev, space, t.sid, first, cs.c_alt, market, market_c=market_c)
     return cs, space
 
 
@@ -235,6 +242,100 @@ def test_without_an_alternative_a_walk_scores_as_the_opening():
     assert decide(cs, ev, space, ["sup:A"]).kind == "accept"
 
 
+@pytest.mark.parametrize("price", [math.inf, -math.inf, math.nan, True, False])
+def test_nonfinite_and_boolean_prices_are_infeasible(price):
+    ev, space = evaluator(), ContractSpace(CASE)
+    terms = {"unit_price": price, "payment_days": 60, "contract_months": 24, "incoterm": "DAP"}
+    assert space.valid(terms, STD)
+    assert math.isinf(ev.c("sup:A", terms))
+    assert ev.price_for("sup:A", terms, math.inf) is None
+
+
+def test_reservation_never_rises_to_meet_an_unaffordable_aspiration():
+    case = with_buyer(
+        alternative={
+            "kind": "quote",
+            "terms": {
+                "unit_price": 80.0,
+                "payment_days": 90,
+                "contract_months": 24,
+                "incoterm": "DAP",
+            },
+        }
+    )
+    ev = evaluator(case)
+    t = thread(ev)
+    cs, space = state(case, [t], ev)
+    target, reservation = cs.targets[t.sid]
+    assert target <= reservation <= cs.c_alt
+    p = decide(cs, ev, space, [t.sid])
+    assert all(e.c <= cs.c_alt + 0.01 for e in p.packages)
+
+
+@pytest.mark.parametrize("hold,regressed", [(False, False), (True, False), (False, True)])
+def test_reduced_reservation_overrides_previous_bid(hold, regressed):
+    ev = evaluator()
+    t = thread(ev, prices=(110.0, 108.0), mine=(230_000.0,))
+    a = replace(assess(t), regressed=regressed)
+    assert bids.next_bid(playbook(CASE), t, a, 190_000, 200_000, 250_000, 0.8, hold) <= 200_000
+
+
+def test_supplier_specific_evidence_selects_high_scenario_consistently():
+    case = with_buyer(category_goal="stabilise", sustainable_margin_pct=8, relationship_eur_per_point=5000)
+    dossier = EvidenceDossier(case["case_id"], should_cost={"sup:A": (95.0, 10.0), "*": (90.0, 15.0)})
+    specific = estimate_supplier(dossier, "sup:A", 110.0, cap=10.0)
+    generic = estimate_supplier(dossier, "sup:B", 110.0)
+    assert specific.full_cost[1] == 95.0  # a quote-based cap cannot overwrite dated cost evidence
+    ev = evaluator(case, sids=("sup:A", "sup:B"), estimates={"sup:A": specific, "sup:B": generic})
+    assert ev.risk_scenario("sup:A") == "high" and ev.risk_scenario("sup:B") == "mid"
+    terms = {"unit_price": 100.0, "payment_days": 60, "contract_months": 24, "incoterm": "DAP"}
+    assert ev.evaluate(CandidatePackage("sup:A", terms, "test")).c == ev.c("sup:A", terms, "high")
+    assert ev.c("sup:B", terms) == ev.c("sup:B", terms, "mid")
+
+
+def test_late_rfq_closes_valid_offer_despite_cheaper_noncompliant_rival():
+    case = {
+        **with_buyer(must_haves=[{"field": "payment_days", "op": ">=", "value": 45}]),
+        "type": "rfq",
+        "suppliers": ["sup:A", "sup:B"],
+    }
+    ev = evaluator(case, sids=("sup:A", "sup:B"))
+    full = {"payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    a = thread(ev, "sup:A", (110.0, 99.0), (180_000.0,) * 8, moves_left=1, standing={**full, "unit_price": 99.0})
+    b = thread(ev, "sup:B", (90.0, 85.0), (160_000.0,), standing={**full, "payment_days": 30, "unit_price": 85.0})
+    cs, space = state(case, [a, b], ev, opening={"sup:A": 110.0, "sup:B": 90.0})
+    p = decide(cs, ev, space, [a.sid, b.sid])
+    assert p.kind == "accept" and p.sid == a.sid
+    ended = replace(b, moves_left=0)
+    assert math.isinf(floor_c(ev, ended))
+
+
+def test_better_terms_can_pay_a_price_above_current_quote():
+    ev, space = evaluator(), ContractSpace(CASE)
+    target = ev.c("sup:A", {"unit_price": 104.0}) - 1000
+    out = bids.generate(ev, space, "sup:A", target, 104.0)
+    selected = bids.select(out)
+    assert any(e.terms["unit_price"] > 104.0 for e in selected)
+    assert all(e.c <= target + 0.01 for e in selected)
+
+
+def test_explicit_dependencies_block_acceptance_until_agreement():
+    ev = evaluator()
+    t = thread(ev, status="final_offer")
+    t.observation = SupplierObservation("m", "f", dependencies=({"condition": "approval pending"},))
+    cs, space = state(CASE, [t], ev)
+    assert not feasible(cs, ev, t)
+    assert decide(cs, ev, space, [t.sid], urgent=True).kind == "walk"
+    assert feasible(cs, ev, replace(t, status="agreed"))
+
+
+def test_observed_cash_and_firmness_affect_assessment():
+    t = thread(evaluator())
+    t.observation = SupplierObservation("m", "f", firmness=3, cash_pressure=True, values=("payment_days",))
+    a = assess(t)
+    assert a.walk_risk >= 0.6 and a.cash_pressure and a.values == ("payment_days",)
+
+
 def test_a_final_offer_that_breaks_a_must_have_is_mirrored_never_accepted():
     case = with_buyer(must_haves=[{"field": "payment_days", "op": ">=", "value": 45}])
     ev = evaluator(case)
@@ -346,8 +447,9 @@ def test_an_rfq_final_offer_left_standing_is_kept_alive_once_its_supplier_waited
 class StubModel:
     def __init__(self):
         self.budgets, self.last = [], (None, 0)
+        self.trace = []
 
-    def complete(self, system, user, timeout_s):
+    def complete(self, system, user, timeout_s, **kwargs):
         self.budgets.append(timeout_s)
         return None  # no answer: the template writes
 
@@ -432,18 +534,18 @@ def test_no_sheet_shows_a_price_above_the_suppliers_own():
     assert [e.terms["unit_price"] for e in bids.select(out, ceiling=floor - 1)] == [floor]  # never none
 
 
-def test_rfq_anchors_sit_below_the_cheapest_quote_and_holding_bidders_still_close():
-    # case P05: the dearest bidder agreed at once to an anchor above a rival's (non-compliant) quote
+def test_rfq_uses_comparable_costs_and_holding_bidders_still_close():
     case = {**CASE, "type": "rfq", "suppliers": ["sup:A", "sup:B", "sup:C"]}
     case = with_buyer(case, must_haves=[{"field": "payment_days", "op": ">=", "value": 45}])
     ev = evaluator(case, sids=("sup:A", "sup:B", "sup:C"))
     openings = {"sup:A": 110.0, "sup:B": 96.0, "sup:C": 118.0}  # B's quote on 30 days breaks the must-have
     threads = [thread(ev, s, (p,)) for s, p in openings.items()]
-    cs, space = state(case, threads, ev, opening=openings, market=min(openings.values()))
+    comparable = ev.c("sup:B", bids.best_combo(ev, ContractSpace(case), "sup:B", 96.0))
+    cs, space = state(case, threads, ev, opening=openings, market_c=comparable)
     for sid in openings:
-        assert cs.targets[sid][0] <= ev.c(sid, bids.best_combo(ev, space, sid, round(0.9 * 96.0, 2))) + 0.01
+        assert cs.targets[sid][0] <= comparable + 0.01
     p = decide(cs, ev, space, ["sup:C", "sup:A", "sup:B"])
-    assert p.sid == "sup:C" and all(e.terms["unit_price"] <= round(0.9 * 96.0, 2) for e in p.packages)
+    assert p.sid == "sup:C" and all(e.c <= comparable + 0.01 for e in p.packages)
     single, sp = ContractSpace(CASE), evaluator()
     assert bids.targets(CASE, None, sp, single, "sup:A", 110.0, math.inf, 110.0) == bids.targets(
         CASE, None, sp, single, "sup:A", 110.0, math.inf
@@ -458,20 +560,19 @@ def test_rfq_anchors_sit_below_the_cheapest_quote_and_holding_bidders_still_clos
     assert (p.kind, p.sid) == ("accept", "sup:A")  # however low the anchor: bidders that hold get a deal
 
 
-def test_a_strategic_suppliers_full_cost_is_capped_by_its_own_ask():
-    # case P02: should-cost above the ask made squeezing look as dear as the price saved
+def test_cost_prior_is_anchored_to_opening_not_subsequent_concessions():
     from arena_kit.buyer import BuyerAgent
 
     case = with_buyer(category_goal="stabilise", sustainable_margin_pct=10, relationship_eur_per_point=5000)
     agent = BuyerAgent()
     agent.prepare(case)
     _, ev = agent.observe(case, opened(110.0))
-    assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.9 * 110.0)  # not 92 % of its price
+    assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.92 * 110.0)
     cheaper = opened(110.0)
     cheaper["sup:A"] += [{"from": "buyer", "term_sheets": []}, {**cheaper["sup:A"][0], "term_sheets": [
         {"term_sheet_id": "offer:A-1", "terms": {"unit_price": 105.0}}]}]  # fmt: skip
     _, ev = agent.observe(case, cheaper)
-    assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.9 * 105.0)
+    assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.92 * 110.0)
     _, ev = agent.observe(with_buyer(case, sustainable_margin_pct=5), opened(110.0))
     assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.92 * 110.0)  # below the cap: as estimated
 

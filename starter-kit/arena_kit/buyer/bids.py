@@ -3,6 +3,7 @@ term sheets that cost exactly that. Concessions follow the supplier's moves (rec
 the clock (an aspiration curve), never pass half the remaining gap and never go backwards - a
 supplier who moves back meets a hold."""
 
+import math
 import statistics
 
 from .records import CandidatePackage
@@ -36,19 +37,19 @@ def best_combo(ev, space, sid, price, prefer=None):
     return space.complete({"unit_price": price}, ev.std.get(sid), lambda t: ev.c(sid, t), prefer)
 
 
-def targets(case, dossier, ev, space, sid, opening_price, c_alt, market=None):
+def targets(case, dossier, ev, space, sid, opening_price, c_alt, market=None, *, market_c=None):
     """(C at our anchor, C we never bid beyond) for one supplier: the anchor on our best terms (not
     below the price that squeezes a strategic supplier), and at most its opening price on our best
-    terms or the alternative, whichever is cheaper. `market`: the cheapest opening quote of the case -
-    in an RFQ no bidder's anchor sits above the one the cheapest quote gets (case P05: a dear
-    bidder agreed at once to an anchor above a rival's quote)."""
+    terms or the alternative, whichever is cheaper. `market_c` is comparable feasible opening
+    total cost. Legacy `market` is ignored because raw prices are not comparable packages."""
     anchor = anchor_price(case, dossier, opening_price, sid)
-    if market:
-        anchor = max(min(anchor, round(0.9 * market, 2)), round(0.5 * opening_price, 2))
     floor = ev.best_price(sid, best_combo(ev, space, sid, anchor))
     c_target = ev.c(sid, best_combo(ev, space, sid, max(anchor, floor)))
     c_res = min(c_alt, ev.c(sid, best_combo(ev, space, sid, opening_price)))
-    return c_target, max(c_target, c_res - 0.01 * (c_res - c_target))
+    if market_c is not None and math.isfinite(market_c):
+        c_target = min(c_target, market_c)
+    c_target = min(c_target, c_res)
+    return c_target, c_res - 0.01 * max(0.0, c_res - c_target)
 
 
 def aspiration(c_target, c_res, tau, beta):
@@ -61,20 +62,22 @@ def next_bid(pb, t, a, c_target, c_res, c_their_on_ours, tau, hold=False):
     price on our best terms - we never offer more than half the gap to it at once. `hold`: no
     concession this turn (a thread we only keep alive)."""
     if not t.my_c:
-        return c_target
+        return min(c_target, c_res)
     last = t.my_c[-1]
     if a.regressed or hold:  # it moved back: we hold - taking a concession back reads as going
-        return last  # backwards and hardens it (case P11: 'you actually went backwards on the price')
+        return min(last, c_res)
     step = pb.k * max(0.0, a.concession)  # reciprocity: their move, in our C
     bid = max(aspiration(c_target, c_res, tau, pb.beta), last + step)
     bid = min(bid, last + 0.5 * max(0.0, c_their_on_ours - last), c_res)
-    return max(bid, last)  # never backwards
+    return min(c_res, max(bid, last))  # current economic limits outrank reciprocity
 
 
 def generate(ev, space, sid, target_c, their_price, standing=None):
     """Complete term sheets that cost us `target_c` (within a cent): the C-optimal one plus
     variants that give the supplier more for the same C. Bounded in C, not in price - a dearer
     price on terms that save us more is fine."""
+    if not math.isfinite(target_c):
+        return []
     std = ev.std.get(sid)
     base = best_combo(ev, space, sid, their_price, standing)
     combos = space.combos(std)
@@ -95,13 +98,14 @@ def generate(ev, space, sid, target_c, their_price, standing=None):
     return out
 
 
-def select(evaluated, demand=None, ceiling=None, n=3):
+def select(evaluated, demand=None, ceiling=None, n=3, *, values=(), reference=None):
     """Up to `n` diverse sheets: the one closest to our ideal terms (the highest price - simple
     suppliers read the price), the one worth most to the supplier, and one more. `demand(terms)`:
     per lever, how much a sheet asks of the supplier - a sheet that asks more than another worth no
     more to the supplier is never sent, ties go to the smaller ask. `ceiling`: the supplier's own price -
     no sheet shows a dearer one while a sheet at or below it exists (cases P02, P18: it answered
     near our dearest shown price)."""
+    evaluated = [e for e in evaluated if math.isfinite(e.c) and math.isfinite(e.cash_theirs)]
     if not evaluated:
         return []
     if ceiling is not None:
@@ -110,10 +114,25 @@ def select(evaluated, demand=None, ceiling=None, n=3):
     pairs = [(e, demand(e.terms) if demand else {}) for e in evaluated]
     if demand:
         pairs = [(e, d) for e, d in pairs if not _dominated(e, d, pairs)]
-    by_cash = [e for e, _ in sorted(pairs, key=lambda p: (-p[0].cash_theirs, sum(p[1].values())))]
+
+    def preference(e):
+        if not reference:
+            return 0
+        return sum(
+            (reference.get(f, e.terms.get(f)) - e.terms.get(f, reference.get(f)))
+            if f == "payment_days"
+            else (e.terms.get(f, reference.get(f)) - reference.get(f, e.terms.get(f)))
+            if f in ("volume_per_year", "contract_months", "lead_time_days")
+            else 0
+            for f in values
+            if isinstance(reference.get(f), int | float) and isinstance(e.terms.get(f), int | float)
+        )
+
+    by_cash = [e for e, _ in sorted(pairs, key=lambda p: (-preference(p[0]), -p[0].cash_theirs, sum(p[1].values())))]
     by_price = [e for e, _ in sorted(pairs, key=lambda p: (-p[0].terms["unit_price"], sum(p[1].values())))]
     picks = []
-    for e in (by_price[0], by_cash[0], *by_cash[1:]):
+    first = by_cash[0] if values else by_price[0]
+    for e in (first, by_price[0], by_cash[0], *by_cash[1:]):
         if len(picks) == n:
             break
         if all(_distance(e.terms, p.terms) > 0 for p in picks):

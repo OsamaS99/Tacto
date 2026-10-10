@@ -13,6 +13,22 @@ EXACT = 600  # free combinations up to this are enumerated; beyond, coordinate d
 DIRECTION = {"payment_days": 1, "chargeback_eur_per_complaint": 1, "lead_time_days": -1, "ppm_commitment": -1}
 
 
+def finite_number(value):
+    """A finite JSON number, excluding bool and overflowing integers."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _finite_values(value):
+    if isinstance(value, dict):
+        return all(_finite_values(v) for v in value.values())
+    return finite_number(value) if isinstance(value, int | float) else True
+
+
 def _unique(values):
     out = []
     for v in values:
@@ -58,6 +74,8 @@ class ContractSpace:
         else coordinate descent); every value is snapped. Among values that cost the same, the one
         nearest the supplier's own terms (`prefer`, else its standard terms): a give that costs us nothing
         (case P10 asked a faster delivery worth 0 to us, and paid for it in the price)."""
+        if not finite_number(terms.get("unit_price")):
+            raise ValueError("unit_price must be a finite number")
         out = {f: self.snap(f, terms[f], std) for f in self.levers if f in terms}
         out["unit_price"] = round(float(terms["unit_price"]), 2)
         free = [f for f in self.levers if f not in terms]
@@ -108,9 +126,11 @@ class ContractSpace:
         if set(terms) != set(self.negotiable):
             errors.append(f"fields {sorted(terms)} != negotiable {sorted(self.negotiable)}")
         price = terms.get("unit_price")
-        if not isinstance(price, int | float) or price <= 0 or round(price, 2) != price:
+        if not finite_number(price) or price <= 0 or round(price, 2) != price:
             errors.append(f"unit_price {price!r} must be > 0 with 2 decimals")
         for f in self.levers:
+            if f in terms and not _finite_values(terms[f]):
+                errors.append(f"{f} contains an invalid number")
             if f in terms and terms[f] not in self.options(f, std):
                 errors.append(f"{f}={terms[f]!r} is not an allowed value")
         if not errors and not must_haves_ok(self.case, terms, std):

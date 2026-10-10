@@ -77,16 +77,18 @@ class Decisions:
         questions += [{"type": "predicate", "name": f"values_{f}", "instructions": i} for f, i in VALUES.items()]
         return {"model": self.model, "input": SOURCE + text[:4000], "questions": questions}
 
-    def post(self, body):
-        r = self.http.post(self.url, json=body, headers=self.headers, timeout=self.timeout_s + 1)
+    def post(self, body, timeout_s=None):
+        budget = self.timeout_s if timeout_s is None else min(self.timeout_s, max(0.0, timeout_s))
+        r = self.http.post(self.url, json=body, headers=self.headers, timeout=budget + 0.25)
         r.raise_for_status()
         return r.json()
 
-    def classify_reply(self, text):
+    def classify_reply(self, text, timeout_s=None):
         """{intent?, firm_final?, cash_pressure?, values?} - confident labels only; None if none."""
         if not text or not text.strip():
             return None
-        out = within(self.post, self.timeout_s, self.request(text))
+        budget = self.timeout_s if timeout_s is None else min(self.timeout_s, max(0.0, timeout_s))
+        out = within(self.post, budget, self.request(text), budget)
         try:
             return self.labels(out["answers"]) if out else None
         except (KeyError, TypeError, ValueError) as e:

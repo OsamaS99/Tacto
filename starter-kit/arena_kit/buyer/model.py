@@ -1,16 +1,16 @@
-"""The model adapter: one `complete(system, user, timeout_s) -> str | None` over a provider chain.
+"""Role-specific models: queueing, validated fallback and work share one absolute budget.
 
-The 60 s per message is a hard limit, so every call runs in a pool thread and the caller waits at
-most `timeout_s` (`result(timeout)`): a slow provider is abandoned, never waited for. The HTTP
-timeout is the budget + 2 s, so an abandoned call ends soon after. No SDK and no retries hide
-time. A global semaphore keeps 10 parallel cases from flooding the provider. Any failure is None:
-the caller falls back to the template, never to a guess."""
+Abandoned HTTP work retains its capacity slot and cannot return to the caller or mutate state.
+"""
 
+import json
 import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
+from urllib.parse import urlparse
 
 import httpx
 
@@ -18,14 +18,28 @@ from ..agents.llm import parse
 
 log = logging.getLogger("arena")
 MAX_CONCURRENT = 12
-FALLBACK_MIN_S = 4.0  # the fallback model only gets a call it can finish
-HTTP_GRACE_S = 2.0
+FALLBACK_MIN_S, FALLBACK_RESERVE_S, SEND_MARGIN_S = 4.0, 8.0, 5.0
+HTTP_GRACE_S = 0.25
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _pool = ThreadPoolExecutor(max_workers=2 * MAX_CONCURRENT, thread_name_prefix="llm")
 
 
+@dataclass(frozen=True, slots=True)
+class RoleProfile:
+    model: str
+    effort: str
+    service_tier: str | None
+    max_completion_tokens: int
+
+
+class Completion(str):
+    def __new__(cls, value, *, tier=None, usage=None):
+        out = super().__new__(cls, value)
+        out.tier, out.usage = tier, usage or {}
+        return out
+
+
 def within(fn, timeout_s, *args):
-    """`fn(*args)` with a hard deadline; None on timeout, error or no free slot."""
     end = time.monotonic() + timeout_s
     if timeout_s <= 0 or not _slots.acquire(timeout=timeout_s):
         return None
@@ -34,108 +48,220 @@ def within(fn, timeout_s, *args):
         try:
             return fn(*args)
         finally:
-            _slots.release()  # an abandoned call keeps its slot until its HTTP timeout ends it
+            _slots.release()
 
     try:
         future = _pool.submit(run)
-    except RuntimeError:  # the pool is shutting down
+    except RuntimeError:
         _slots.release()
         return None
     try:
         return future.result(timeout=max(0.0, end - time.monotonic()))
-    except Exception as e:  # TimeoutError included
-        log.info("model call failed: %s", type(e).__name__ if isinstance(e, TimeoutError) else e)
+    except Exception as e:
+        log.info("model call failed: %s", type(e).__name__)
         return None
 
 
 def parse_json(text):
-    """The first JSON object in a reply (tolerates fences and chatter), else None."""
     try:
         out = parse(text or "")
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     return out if isinstance(out, dict) else None
 
 
 class Model:
-    def __init__(self, providers):
-        """`providers`: [(name, call(system, user, timeout_s) -> str)], primary first."""
+    def __init__(self, providers, *, role_providers=None, profiles=None, fallback_reserve_s=FALLBACK_RESERVE_S):
         self.providers = list(providers)
-        self._last = threading.local()  # per case thread: (provider name or None, ms)
+        self.role_providers, self.profiles = role_providers or {}, profiles or {}
+        self.fallback_reserve_s = fallback_reserve_s
+        self._last = threading.local()
 
     @property
     def last(self):
         return getattr(self._last, "value", (None, 0))
 
-    def complete(self, system, user, timeout_s):
+    @property
+    def trace(self):
+        return getattr(self._last, "trace", [])
+
+    def configuration(self):
+        return {role: [asdict(p) for p in profiles] for role, profiles in self.profiles.items()}
+
+    def complete(self, system, user, timeout_s, *, role="communication", deadline=None, validate=None):
+        """Validated JSON; deadline excludes dispatch margin. No extra primary repair chain."""
         t0 = time.monotonic()
-        end = t0 + timeout_s
-        for i, (name, call) in enumerate(self.providers):
+        end = min(t0 + max(0.0, timeout_s), deadline if deadline is not None else float("inf"))
+        providers = self.role_providers.get(role, self.providers)
+        attempts = []
+        self._last.value, self._last.trace = (None, 0), attempts
+        for i, (name, call) in enumerate(providers):
             left = end - time.monotonic()
             if left <= 0 or (i and left < FALLBACK_MIN_S):
                 break
-            text = within(call, left, system, user, left)
-            if text:
-                self._last.value = (name, int(1000 * (time.monotonic() - t0)))
-                return text
-        self._last.value = (None, int(1000 * (time.monotonic() - t0)))
+            if i == 0 and len(providers) > 1:
+                if left < self.fallback_reserve_s + FALLBACK_MIN_S:
+                    continue  # spend a short budget on the faster fallback
+                allotted = left - self.fallback_reserve_s
+            else:
+                allotted = left
+            attempt_end, started = time.monotonic() + allotted, []
+
+            def invoke(call=call, attempt_end=attempt_end, started=started):
+                started.append(time.monotonic())
+                available = attempt_end - time.monotonic()
+                return call(system, user, available) if available > 0 else None
+
+            a0 = time.monotonic()
+            answer = within(invoke, allotted)
+            errors = []
+            if not answer:
+                errors = ["provider_error_or_timeout"]
+            elif time.monotonic() >= end:
+                errors = ["deadline"]
+            elif parse_json(answer) is None:
+                errors = ["invalid_json"]
+            elif validate:
+                try:
+                    errors = list(validate(answer) or [])
+                except Exception:
+                    errors = ["validation_exception"]
+            if time.monotonic() >= end:
+                errors = ["deadline"]
+            profiles = self.profiles.get(role, [])
+            profile = profiles[i] if i < len(profiles) else None
+            attempt = {
+                "role": role,
+                "model": name,
+                "effort": profile.effort if profile else None,
+                "requested_tier": profile.service_tier if profile else None,
+                "returned_tier": getattr(answer, "tier", None),
+                "queue_ms": round(1000 * ((started[0] if started else time.monotonic()) - a0)),
+                "attempt_ms": round(1000 * (time.monotonic() - a0)),
+                "validation": "passed" if not errors else "rejected",
+                "fallback_reason": errors[0] if errors else None,
+                "usage": getattr(answer, "usage", {}),
+            }
+            attempts.append(attempt)
+            log.info("model %s", json.dumps(attempt))
+            if not errors:
+                self._last.value = (name, round(1000 * (time.monotonic() - t0)))
+                return answer
+        self._last.value = (None, round(1000 * (time.monotonic() - t0)))
         return None
 
 
-def openai_chat(base, key, model, effort=None, transport=None):
-    """An OpenAI-compatible chat/completions call. JSON mode until the endpoint refuses it (400)."""
+def _unsupported_format(response):
+    try:
+        detail = json.dumps(response.json().get("error", {})).lower()
+    except (ValueError, AttributeError):
+        return False
+    return "response_format" in detail and any(x in detail for x in ("unsupported", "not supported"))
+
+
+def openai_chat(base, key, model, effort=None, transport=None, *, service_tier=None, max_completion_tokens=8192):
     http = httpx.Client(transport=transport)
     url, headers = f"{base.rstrip('/')}/chat/completions", {"Authorization": f"Bearer {key}"}
-    state = {"json": True}
+    state, lock = {"json": True}, threading.Lock()
 
     def call(system, user, timeout_s):
         end = time.monotonic() + timeout_s
-        body = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_completion_tokens": max_completion_tokens,
+        }
         if effort:
             body["reasoning_effort"] = effort
-        while True:
-            payload = {**body, "response_format": {"type": "json_object"}} if state["json"] else body
-            left = end - time.monotonic()
+        if service_tier:
+            body["service_tier"] = service_tier
+        while (left := end - time.monotonic()) > 0:
+            with lock:
+                json_mode = state["json"]
+            payload = {**body, "response_format": {"type": "json_object"}} if json_mode else body
             r = http.post(url, json=payload, headers=headers, timeout=left + HTTP_GRACE_S)
-            if r.status_code == 400 and state["json"] and end - time.monotonic() > 3:
-                state["json"] = False  # no JSON mode here: ask once more without it
+            if r.status_code == 400 and json_mode and _unsupported_format(r) and end - time.monotonic() > 3:
+                with lock:
+                    state["json"] = False
                 continue
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            data = r.json()
+            choice, message = data["choices"][0], data["choices"][0]["message"]
+            if choice.get("finish_reason") not in (None, "stop") or message.get("refusal"):
+                return None
+            content = message.get("content")
+            return Completion(content, tier=data.get("service_tier"), usage=data.get("usage")) if content else None
+        return None
 
     return call
 
 
-def anthropic_messages(base, key, model, effort=None, transport=None):
-    """The Anthropic Messages API over httpx (no SDK retries); effort as `output_config`."""
+def anthropic_messages(base, key, model, effort=None, transport=None, *, max_completion_tokens=8192):
     http = httpx.Client(transport=transport)
     url = f"{base.rstrip('/')}/messages"
     headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
 
     def call(system, user, timeout_s):
-        body = {"model": model, "max_tokens": 8000, "system": system, "messages": [{"role": "user", "content": user}]}
+        body = {
+            "model": model,
+            "max_tokens": max_completion_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
         if effort:
             body["output_config"] = {"effort": effort}
         r = http.post(url, json=body, headers=headers, timeout=timeout_s + HTTP_GRACE_S)
         r.raise_for_status()
-        return "".join(b.get("text", "") for b in r.json()["content"] if b.get("type") == "text")
+        data = r.json()
+        if data.get("stop_reason") in ("max_tokens", "refusal"):
+            return None
+        return Completion(
+            "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text"), usage=data.get("usage")
+        )
 
     return call
 
 
 def model_from_env():
-    """LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_EFFORT, LLM_FALLBACK_MODEL; None when
-    LLM_MODEL is unset or LLM_TURN=0 (template only)."""
+    """Unconfigured or LLM_TURN=0 means templates. Returned configuration never contains secrets."""
     primary = os.environ.get("LLM_MODEL")
     if not primary or os.environ.get("LLM_TURN", "1") == "0":
         return None
-    effort = os.environ.get("LLM_EFFORT") or None
-    if os.environ.get("LLM_PROVIDER", "openai") == "anthropic":
-        base = os.environ.get("LLM_BASE_URL", "https://api.anthropic.com/v1")
-        key = os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-        make = anthropic_messages
-    else:
-        base = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
-        key, make = os.environ.get("LLM_API_KEY", ""), openai_chat
-    names = dict.fromkeys(m for m in (primary, os.environ.get("LLM_FALLBACK_MODEL")) if m)
-    return Model([(m, make(base, key, m, effort)) for m in names])
+    provider = os.environ.get("LLM_PROVIDER", "openai")
+    base = os.environ.get(
+        "LLM_BASE_URL", "https://api.anthropic.com/v1" if provider == "anthropic" else "https://api.openai.com/v1"
+    )
+    key = os.environ.get("LLM_API_KEY") or (os.environ.get("ANTHROPIC_API_KEY", "") if provider == "anthropic" else "")
+    default_tier = "priority" if provider == "openai" and urlparse(base).hostname == "api.openai.com" else None
+    tier = os.environ.get("LLM_SERVICE_TIER", default_tier) or None
+    fallback = os.environ.get("LLM_FALLBACK_MODEL", "gpt-6-luna" if provider == "openai" else "")
+    role_providers, profiles = {}, {}
+    for role, effort, limit in (
+        ("preparation", "high", 8192),
+        ("interpretation", "high", 8192),
+        ("communication", "low", 2048),
+        ("critic", "high", 16384),
+    ):
+        chosen_effort = os.environ.get(f"LLM_{role.upper()}_EFFORT") or (
+            os.environ.get("LLM_EFFORT", effort) if role != "communication" else effort
+        )
+        chain = [RoleProfile(primary, chosen_effort, tier, limit)]
+        if fallback and fallback != primary:
+            chain.append(RoleProfile(fallback, os.environ.get("LLM_FALLBACK_EFFORT", "low"), tier, 2048))
+        profiles[role] = chain
+        calls = []
+        for p in chain:
+            if provider == "anthropic":
+                call = anthropic_messages(base, key, p.model, p.effort, max_completion_tokens=p.max_completion_tokens)
+            else:
+                call = openai_chat(
+                    base,
+                    key,
+                    p.model,
+                    p.effort,
+                    service_tier=p.service_tier,
+                    max_completion_tokens=p.max_completion_tokens,
+                )
+            calls.append((p.model, call))
+        role_providers[role] = calls
+    return Model(role_providers["communication"], role_providers=role_providers, profiles=profiles)

@@ -2,7 +2,7 @@
 
 `starter-kit/arena_kit/buyer/` is an autonomous buyer for Hollerau Pumpenwerke. Code owns every
 number: total cost C, the packages, when to accept or walk away. The language model reads supplier
-replies and writes the e-mails inside a guard. Design, prompts, state flow and evaluation:
+replies and selects approved packages and evidence; code renders the e-mails inside a guard. Design, prompts, state flow and evaluation:
 [starter-kit/docs/BUYER.md](starter-kit/docs/BUYER.md).
 
 ## Run it
@@ -29,12 +29,18 @@ uv run arena run --set final --agent buyer --parallel 10    # the Live Final (st
 | `LLM_BASE_URL` | endpoint for `openai` |
 | `LLM_API_KEY` | model key (`ANTHROPIC_API_KEY` for `anthropic`) |
 | `LLM_MODEL` | turn model (we run `gpt-6.1-sol`) |
-| `LLM_EFFORT` | reasoning effort for the turn model (`medium`) |
+| `LLM_EFFORT` | base effort for preparation, interpretation and offline review; defaults to high |
+| `LLM_SERVICE_TIER` | processing tier for supported OpenAI requests; defaults to Priority on the official endpoint |
+| `LLM_PREPARATION_EFFORT`, `LLM_INTERPRETATION_EFFORT`, `LLM_CRITIC_EFFORT` | optional role effort overrides |
+| `LLM_COMMUNICATION_EFFORT`, `LLM_FALLBACK_EFFORT` | routine selection and fallback effort; default to low |
 | `LLM_FALLBACK_MODEL` | faster model when the turn model is slow or fails (`gpt-6-luna`) |
 | `DECISIONS_ENABLED`, `DECISIONS_MODEL` | optional reply classifier via OpenAI Decisions (`gpt-6-luna`) |
 | `LLM_TURN` | `0` = template e-mails only, no model calls |
-| `BUYER_CONCURRENT` | `0` = serve RFQ threads one at a time (default) |
+| `BUYER_CONCURRENT` | enable bounded concurrent RFQ sends; sequential remains the default until hosted validation |
 | `BUYER_RUNS` | folder for session state and event logs (default `runs/`) |
+
+Local evaluations use no model unless explicitly enabled; buyer and supplier models have separate flags.
+Hosted practice and sandbox runs remain paused.
 
 Without a model the buyer still plays every case: the deterministic policy and the template
 e-mail never depend on the model.

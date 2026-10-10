@@ -29,26 +29,22 @@ PKT = DisclosurePacket(
     their_last="Our price is final. Please pay faster.",
     allowed_numbers=frozenset({"210.50", "205.00", "60", "30", "24"}),
     subject="Re: Housing price",
+    questions=("breakdown",),
+    acknowledgments=("neutral", "cash"),
 )
 
 
-def turn(package_ids=("P1",), claim_ids=("C1",), question="breakdown", opening="Thank you for your offer."):
+def turn(package_ids=("P1",), claim_ids=("C1",), question="breakdown", **extra):
     return json.dumps(
         {
-            "assessment": {
-                "intent": "hold",
-                "firmness": 2,
-                "cash_pressure": True,
-                "values": ["payment_days"],
-                "evidence_message_ids": ["msg-4"],
-            },
-            "proposal": {
-                "package_ids": list(package_ids),
-                "claim_ids": list(claim_ids),
-                "question": question,
-                "rationale": "trade payment for price",
-            },
-            "message": {"subject": "Re: Housing price", "opening": opening, "ask": "Could you confirm one?"},
+            "package_ids": list(package_ids),
+            "claim_ids": list(claim_ids),
+            "question": question,
+            "acknowledgment": "neutral",
+            "trade": None,
+            "tone": "professional",
+            "rationale": "trade payment for price",
+            **extra,
         }
     )
 
@@ -76,32 +72,41 @@ def test_writer_timeout_falls_back_to_template_within_budget(monkeypatch):
     assert msg == writer.template(PKT)
 
 
-def test_writer_invalid_json_gets_one_repair_then_the_template():
+def test_writer_invalid_json_uses_template_without_repair():
     call, calls = replies("I think we should push.")
     msg, source, _ = writer.write_turn(Model([("m", call)]), PKT, 10.0)
-    assert source == "template" and msg == writer.template(PKT)
-    assert len(calls) == 1  # no JSON at all: nothing to repair
-    call, calls = replies(turn(opening="We expect 199 EUR."))
-    msg, source, _ = writer.write_turn(Model([("m", call)]), PKT, 10.0)
-    assert source == "template" and len(calls) == 2 and "REJECTED" in calls[1]
+    assert source == "template" and msg == writer.template(PKT) and len(calls) == 1
 
 
-@pytest.mark.parametrize("bad", [{"package_ids": ("P9",)}, {"claim_ids": ("C7",)}, {"question": "budget"}])
-def test_writer_rejects_ids_it_did_not_offer(bad):
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"package_ids": ("P9",)},
+        {"claim_ids": ("C7",)},
+        {"question": "budget"},
+        {"message": {"opening": "We guarantee exclusivity."}},
+    ],
+)
+def test_writer_rejects_ids_and_public_text_it_did_not_offer(bad):
     call, _ = replies(turn(**bad))
     msg, source, _ = writer.write_turn(Model([("m", call)]), PKT, 10.0)
     assert source == "template" and msg == writer.template(PKT)
 
 
-def test_writer_assembles_the_chosen_subset_verbatim():
-    call, _ = replies(turn(package_ids=("P2",)))
+def test_writer_assembles_the_chosen_subset_verbatim_and_keeps_rationale_private():
+    call, _ = replies(turn(package_ids=("P2",), rationale="Our private budget is seventy thousand."))
     msg, source, read = writer.write_turn(Model([("m", call)]), PKT, 10.0)
-    assert source == "llm" and read["intent"] == "hold"
+    assert source == "llm" and "private budget" in read["rationale"]
     assert msg.term_sheets == (SHEETS[1],) and msg.refs == ("idx:STEEL",)
     assert CLAIM.sentence in msg.body and writer.QUESTIONS["breakdown"] in msg.body
-    call, _ = replies(turn(package_ids=("P1", "P9")), turn(claim_ids=()))
-    msg, source, _ = writer.write_turn(Model([("m", call)]), PKT, 10.0)
-    assert source == "repaired" and msg.refs == () and CLAIM.sentence not in msg.body
+    assert "budget" not in msg.body
+
+
+def test_invalid_selection_advances_to_fallback_not_a_second_primary_call():
+    bad, calls = replies(turn(package_ids=("P9",)))
+    good, _ = replies(turn(claim_ids=()))
+    msg, source, _ = writer.write_turn(Model([("bad", bad), ("good", good)]), PKT, 20.0)
+    assert source == "llm" and msg.refs == () and len(calls) == 1
 
 
 def test_model_uses_the_fallback_when_the_primary_fails():
@@ -185,16 +190,7 @@ def test_decisions_returns_none_on_error_or_timeout(kw):
 
 
 def test_every_role_has_a_prompt_a_schema_and_a_valid_example():
-    names = {
-        "evidence_researcher",
-        "procurement_specialist",
-        "counterparty_analyst",
-        "negotiation_planner",
-        "communication_agent",
-        "decision_selector",
-        "semantic_reviewer",
-        "replay_analyst",
-    }
+    names = {"preparation", "counterparty_analyst", "communication_agent", "replay_analyst"}
     assert set(ROLES) == names
     for role in [*ROLES.values(), PREP, TURN]:
         assert role.system.startswith(SHARED) and role.schema["type"] == "object"
@@ -205,14 +201,24 @@ def test_every_role_has_a_prompt_a_schema_and_a_valid_example():
     assert check(TURN.schema, {"proposal": {}}) != []
 
 
-def test_prep_returns_bounded_adjustments_or_nothing():
-    case = {"case_id": "S01", "type": "renewal", "buyer": {"category_goal": "leverage"}, "negotiable": ["unit_price"]}
-    dossier = EvidenceDossier("S01", text="no data")
-    good = json.dumps({"playbook": {"beta": 0.5, "k": 0.7, "p_walk": 0.3}, "notes": ["fine"]})
-    call, _ = replies(good)
-    assert writer.prep(Model([("m", call)]), case, dossier) == {"beta": 0.5, "k": 0.7, "p_walk": 0.3, "notes": ["fine"]}
-    call, _ = replies(json.dumps({"playbook": {"beta": 9, "k": 0.7, "p_walk": 0.3}, "notes": []}))
-    assert writer.prep(Model([("m", call)]), case, dossier) == {}
+def test_prep_returns_a_bounded_brief_or_defaults():
+    case = {
+        "case_id": "T",
+        "type": "renewal",
+        "buyer": {"category_goal": "leverage"},
+        "negotiable": ["unit_price", "payment_days"],
+    }
+    dossier = EvidenceDossier("T", text="no data")
+    good = {**PREP.example, "playbook": {"beta": 0.5, "k": 0.7, "p_walk": 0.3}}
+    call, _ = replies(json.dumps(good))
+    brief = writer.prep(Model([("m", call)]), case, dossier)
+    assert brief.playbook == good["playbook"] and brief.questions == ("breakdown",)
+    bad = {**good, "playbook": {"beta": 9, "k": 0.7, "p_walk": 0.3}}
+    call, _ = replies(json.dumps(bad))
+    assert writer.prep(Model([("m", call)]), case, dossier).playbook == {}
+    invented = {**good, "facts": [{"kind": "fact", "source_ids": ["cost:invented"], "text": "Cheap."}]}
+    call, _ = replies(json.dumps(invented))
+    assert not writer.prep(Model([("m", call)]), case, dossier).facts
 
 
 def test_replay_summarises_without_a_model(tmp_path):
@@ -224,7 +230,8 @@ def test_replay_summarises_without_a_model(tmp_path):
     (tmp_path / "s1.events.jsonl").write_text("\n".join(map(json.dumps, lines)) + "\n{broken")
     out = replay.analyze([tmp_path])
     assert out["source"] == "code" and out["summary"]["http_errors"] == {"422": 1}
-    assert {f["category"] for f in out["failures"]} == {"economic", "execution"}
+    assert {f["category"] for f in out["failures"]} == {"execution"}
+    assert out["summary"]["no_deal"] == 1  # choosing a better alternative need not be a policy failure
     assert ROLES["replay_analyst"].check({k: out[k] for k in ROLES["replay_analyst"].schema["required"]}) == []
 
 

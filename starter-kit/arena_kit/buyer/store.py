@@ -82,10 +82,31 @@ class Store:
                 self._write(session_id, data)
             return data["memo"]
 
-    def event(self, session_id, **fields):
-        line = json.dumps({"ts": round(time.time(), 3), **fields}, ensure_ascii=False, default=str)
+    def case_memo(self, case_id, **values):
+        """Persist preparation before a session opens; runtime clocks are never cached here."""
+        path = self.root / "_briefs" / f"{_safe(case_id)}.json"
         with self.lock:
-            folder = self._dir(session_id)
+            try:
+                data = json.loads(path.read_text())
+            except FileNotFoundError:
+                data = {}
+            if values:
+                data.update(values)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f, ensure_ascii=False, default=str)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            return data
+
+    def event(self, session_key, **fields):
+        line = json.dumps(
+            {"ts": round(time.time(), 3), "session_id": session_key, **fields}, ensure_ascii=False, default=str
+        )
+        with self.lock:
+            folder = self._dir(session_key)
             folder.mkdir(parents=True, exist_ok=True)
-            with open(folder / f"{_safe(session_id)}.events.jsonl", "a") as f:
+            with open(folder / f"{_safe(session_key)}.events.jsonl", "a") as f:
                 f.write(line + "\n")

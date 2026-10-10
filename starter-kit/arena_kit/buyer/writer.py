@@ -1,37 +1,70 @@
-"""The Communication step: a DisclosurePacket (approved facts, claims, packages) becomes the
-e-mail. One combined model call (analyst, planner, writer) may pick a subset of the approved
-packages, claims and one question kind by ID and write the opening and the ask; code assembles the
-body, so claim figures are verbatim and the model writes none. Anything invalid gets one repair
-re-ask if time allows, then the template - which always works."""
+"""A selector chooses approved IDs. All supplier-facing sentences and numbers are code-rendered."""
 
 import json
-import logging
-import re
 import time
 
-from .guard import ID_RE
+from .guard import ID_RE, _favours
 from .model import parse_json
 from .playbook import playbook
-from .prompts import PREP, QUESTION_KINDS, TURN
-from .records import DisclosurePacket, PublicMessage
+from .prompts import PREP, TURN
+from .records import DisclosurePacket, NegotiationBrief, PublicMessage
 
-log = logging.getLogger("arena")
-MIN_CALL_S = 3.0  # below this a call cannot finish: the template instead
-PREP_BUDGET_S = 25.0
-NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
+MIN_CALL_S = 3.0
+PREP_BUDGET_S = PREP.budget_s
 SIGN_OFF = ["", "Best regards", "Hollerau Pumpenwerke, Purchasing"]
-
 QUESTIONS = {
     "breakdown": "Could you send us a cost breakdown for this part?",
     "lead_time": "What is the shortest lead time you can confirm?",
     "variant": "Is there a cheaper variant or specification you would suggest?",
-    "validity": "Could you confirm until when your offer remains valid?",  # a keep-alive: code only
+    "validity": "Could you confirm until when your offer remains valid?",
+    "technical": "Could you clarify which technical approval or specification is required?",
+}
+ACKNOWLEDGMENTS = {
+    "neutral": "Thank you for your message.",
+    "final": "Thank you for clarifying your position.",
+    "cash": "Thank you for explaining the importance of payment timing.",
+    "technical": "Thank you for outlining the technical requirements.",
+}
+FIELD_NAMES = {
+    "payment_days": "payment",
+    "contract_months": "contract duration",
+    "volume_per_year": "volume",
+    "lead_time_days": "delivery",
+    "effective_date": "effective date",
+    "incoterm": "delivery responsibility",
+    "index_clause": "indexation",
+    "ppm_commitment": "quality",
+    "tooling_eur": "tooling",
+    "chargeback_eur_per_complaint": "complaint chargeback",
 }
 
 
-def disclosure(cs, t, proposal, claims):
+def disclosure(cs, t, proposal, claims, *, blocked_questions=()):
     sheets = tuple(p.terms for p in proposal.packages)
-    numbers = {_num(v) for s in sheets for v in s.values() if isinstance(v, int | float)}
+    observation = t.observation
+    questions = []
+    if t.status == "open":
+        questions = [
+            q
+            for q in (proposal.question, *(cs.brief.questions if getattr(cs, "brief", None) else ()))
+            if q in QUESTIONS and q not in blocked_questions
+        ]
+        if not questions and observation and observation.dependencies and "technical" not in blocked_questions:
+            questions = ["technical"]
+    acks = ["neutral"]
+    if t.status in ("final_offer", "agreed"):
+        acks.append("final")
+    if observation and observation.cash_pressure:
+        acks.append("cash")
+    if observation and observation.dependencies:
+        acks.append("technical")
+    trades = [
+        f
+        for f in FIELD_NAMES
+        if sheets
+        and all(f in s for s in sheets)
+        and (len({json.dumps(s[f], sort_keys=True) for s in sheets}) > 1 or (observation and f in observation.values))
+    ]
     return DisclosurePacket(
         sid=t.sid,
         mode=cs.playbook.mode,
@@ -39,126 +72,182 @@ def disclosure(cs, t, proposal, claims):
         rev=t.rev,
         packages=sheets,
         claims=tuple(claims),
-        question=proposal.question,
-        their_last=t.last_body[:1500],
-        allowed_numbers=frozenset(numbers),
+        question=questions[0] if questions else None,
+        their_last=t.last_body[:3000],
+        allowed_numbers=frozenset(),
         subject=f"Re: {cs.case['title']}",
         status=t.status,
+        questions=tuple(dict.fromkeys(questions)),
+        acknowledgments=tuple(acks),
+        trades=tuple(trades),
     )
 
 
-def _num(v):
-    return f"{v:.2f}" if isinstance(v, float) else str(v)
+def _render(pkt, sheets, claims, question, acknowledgment="neutral", trade=None, tone="professional"):
+    lines = ["Dear Sir or Madam,", "", ACKNOWLEDGMENTS[acknowledgment]]
+    if tone == "partner":
+        lines.append("We appreciate your work with us on this supply.")
+    lines += [c.sentence for c in claims]
+    if len(sheets) > 1:
+        lines.append("We attach alternative packages; any of them works for us.")
+    elif sheets:
+        lines.append("Please find our proposal in the attached term sheet.")
+    if trade:
+        lines.append(f"We can offer the {FIELD_NAMES[trade]} terms shown if you confirm this package as a whole.")
+    if sheets:
+        lines.append(
+            "Please confirm which attached package you can support."
+            if len(sheets) > 1
+            else "Please confirm whether you can support the attached package."
+        )
+    if question:
+        lines.append(QUESTIONS[question])
+    refs = tuple(dict.fromkeys(i for c in claims for i in c.ids))
+    return PublicMessage(pkt.subject, "\n".join(lines + SIGN_OFF), tuple(sheets), refs)
 
 
 def template(pkt: DisclosurePacket) -> PublicMessage:
-    """The deterministic e-mail: polite, the claims verbatim, the packages described by the sheets."""
-    lines = ["Dear Sir or Madam,", "", "thank you for your message."]
-    lines += [c.sentence for c in pkt.claims]
-    if len(pkt.packages) > 1:
-        lines.append("We attach alternative packages; any of them works for us.")
-    elif pkt.packages:
-        lines.append("Please find our proposal in the attached term sheet.")
-    if pkt.question:
-        lines.append(QUESTIONS.get(pkt.question, pkt.question))
-    lines += ["", "Best regards", "Hollerau Pumpenwerke, Purchasing"]
-    refs = tuple(dict.fromkeys(i for c in pkt.claims for i in c.ids))
-    return PublicMessage(pkt.subject, "\n".join(lines), pkt.packages, refs)
+    sheets = pkt.packages[:1] if pkt.status in ("final_offer", "agreed") else pkt.packages
+    price = min((s["unit_price"] for s in sheets if s.get("unit_price")), default=None)
+    claims = tuple(c for c in pkt.claims if _favours(c, price)) if pkt.status == "open" else ()
+    question = pkt.question if pkt.question in pkt.questions and pkt.status == "open" else None
+    return _render(
+        pkt,
+        sheets,
+        claims,
+        question,
+        "final" if "final" in pkt.acknowledgments else "neutral",
+        tone="partner" if pkt.goal in ("stabilise", "secure_supply") else "professional",
+    )
 
 
 def write(model, pkt, budget_s, case_id="", focus=""):
-    """The model's e-mail within `budget_s`; the template when it cannot."""
     return write_turn(model, pkt, budget_s, case_id, focus)[0]
 
 
-def write_turn(model, pkt, budget_s, case_id="", focus=""):
-    """(PublicMessage, source llm|repaired|template, the model's assessment or None)."""
-    end = time.monotonic() + budget_s
+def write_turn(model, pkt, budget_s, case_id="", focus="", *, deadline=None, observation=None):
+    end = min(time.monotonic() + max(0, budget_s), deadline if deadline is not None else float("inf"))
     packages = {f"P{i}": s for i, s in enumerate(pkt.packages, 1)}
     claims = {f"C{i}": c for i, c in enumerate(pkt.claims, 1)}
-    if model is None or not packages:
+    if model is None or not packages or end - time.monotonic() < MIN_CALL_S:
         return template(pkt), "template", None
     system, user = TURN.render(
         case_id=case_id,
         case_type=pkt.mode,
         goal=pkt.goal,
         rev=pkt.rev,
-        budget_s=budget_s,
+        budget_s=max(0, budget_s),
         focus=focus or "-",
-        packages="\n".join(f"{i}: {json.dumps(s)}" for i, s in packages.items()),
+        packages=json.dumps(packages),
         claims="\n".join(f"{i}: {c.sentence}" for i, c in claims.items()) or "(none)",
-        questions=", ".join(QUESTION_KINDS),
-        message_id=f"msg-{pkt.rev}",
+        questions=json.dumps(pkt.questions),
+        acknowledgments=json.dumps(pkt.acknowledgments),
+        trades=json.dumps(pkt.trades),
         status=pkt.status,
+        observation=json.dumps(observation or {}),
         their_last=pkt.their_last or "(none)",
     )
-    source = "llm"
-    while (left := end - time.monotonic()) >= MIN_CALL_S:
-        out = parse_json(model.complete(system, user, left))
-        if out is None:
-            break  # no answer from any model: a re-ask would not get one either
-        errors = turn_errors(out, packages, claims, pkt.allowed_numbers | set(NUM_RE.findall(pkt.subject)))
-        if not errors:
-            return assemble(pkt, out, packages, claims), source, out["assessment"]
-        if source == "repaired":
-            break
-        log.info("turn call invalid (%s) - one repair", "; ".join(errors[:3]))
-        user += f"\n\nYOUR LAST REPLY WAS REJECTED: {'; '.join(errors[:5])}. Return the corrected JSON object only."
-        source = "repaired"
-    return template(pkt), "template", None
+    raw = model.complete(
+        system,
+        user,
+        end - time.monotonic(),
+        role="communication",
+        deadline=end,
+        validate=lambda text: turn_errors(parse_json(text), packages, claims, pkt=pkt),
+    )
+    out = parse_json(raw)
+    if out is None:
+        return template(pkt), "template", None
+    return assemble(pkt, out, packages, claims), "llm", {"rationale": out["rationale"]}
 
 
-def turn_errors(out, packages, claims, allowed_numbers):
-    """Schema errors, IDs that were not offered, and figures or data IDs in the model's own text."""
+def turn_errors(out, packages, claims, allowed_numbers=None, *, pkt=None):
     errors = TURN.check(out)
     if errors:
         return errors
-    p, m = out["proposal"], out["message"]
-    errors += [f"package {i} not offered" for i in p["package_ids"] if i not in packages]
-    errors += [f"claim {i} not offered" for i in p["claim_ids"] if i not in claims]
-    for field in ("subject", "opening", "ask"):
-        if ID_RE.search(m[field]):
-            errors.append(f"{field}: data IDs are added by code")
-        if bad := [n for n in NUM_RE.findall(m[field]) if n not in allowed_numbers]:
-            errors.append(f"{field}: figures {bad} are not approved")
+    errors += [f"package {i} not offered" for i in out["package_ids"] if i not in packages]
+    errors += [f"claim {i} not offered" for i in out["claim_ids"] if i not in claims]
+    if errors:
+        return errors
+    chosen = [packages[i] for i in out["package_ids"]]
+    price = min((s["unit_price"] for s in chosen if s.get("unit_price")), default=None)
+    errors += ["claim no longer buyer-favourable" for i in out["claim_ids"] if not _favours(claims[i], price)]
+    if pkt:
+        if out["question"] and out["question"] not in pkt.questions:
+            errors.append("question not offered")
+        if out["acknowledgment"] not in pkt.acknowledgments:
+            errors.append("acknowledgment not offered")
+        if out["trade"] and (out["trade"] not in pkt.trades or any(out["trade"] not in s for s in chosen)):
+            errors.append("trade not present in selected packages")
+        if pkt.status in ("final_offer", "agreed") and (len(chosen) != 1 or out["claim_ids"] or out["question"]):
+            errors.append("final offer requires a single confirmation package")
     return errors
 
 
 def assemble(pkt, out, packages, claims):
-    p, m = out["proposal"], out["message"]
-    sheets = tuple(packages[i] for i in dict.fromkeys(p["package_ids"]))
-    chosen = [claims[i] for i in dict.fromkeys(p["claim_ids"])]
-    lines = ["Dear Sir or Madam,", "", m["opening"].strip(), *(c.sentence for c in chosen)]
-    lines.append(
-        "We attach alternative packages; any of them works for us."
-        if len(sheets) > 1
-        else "Please find our proposal in the attached term sheet."
+    return _render(
+        pkt,
+        [packages[i] for i in out["package_ids"]],
+        [claims[i] for i in out["claim_ids"]],
+        out["question"],
+        out["acknowledgment"],
+        out["trade"],
+        out["tone"],
     )
-    if m["ask"].strip():
-        lines.append(m["ask"].strip())
-    if p["question"]:
-        lines.append(QUESTIONS[p["question"]])
-    refs = tuple(dict.fromkeys(i for c in chosen for i in c.ids))
-    return PublicMessage(m["subject"].strip() or pkt.subject, "\n".join(lines + SIGN_OFF), sheets, refs)
 
 
 def prep(model, case, dossier, budget_s=PREP_BUDGET_S):
-    """Playbook adjustments {beta, k, p_walk} plus notes from the preparation call; {} on failure.
-    `playbook.bounded` clamps them again."""
     default = playbook(case)
+    claims = dossier.claims if dossier else []
+    sources = {i for c in claims for i in c.ids} | set(ID_RE.findall(dossier.text if dossier else ""))
+    sources |= set(ID_RE.findall(json.dumps(case)))
+    claim_ids = {c.cid for c in claims}
+    suppliers = set(case.get("suppliers", []))
     system, user = PREP.render(
         case_id=case["case_id"],
         case_type=case.get("type", ""),
         goal=default.goal,
         rev=0,
         budget_s=budget_s,
-        case=json.dumps(case, ensure_ascii=False, default=str)[:6000],
-        dossier=(dossier.text or "-")[:8000],
+        case=json.dumps(case, default=str)[:8000],
+        dossier=(dossier.text or "-")[:12000] if dossier else "(none)",
+        claim_ids=json.dumps(sorted(claim_ids)),
         defaults=json.dumps({"beta": default.beta, "k": default.k, "p_walk": default.p_walk}),
     )
-    out = parse_json(model.complete(system, user, budget_s)) if model is not None else None
-    if out is None or (errors := PREP.check(out)):
-        if out is not None:
-            log.info("%s prep invalid: %s", case["case_id"], "; ".join(errors[:3]))
-        return {}
-    return {**out["playbook"], "notes": out["notes"]}
+
+    def validate(raw):
+        out = parse_json(raw)
+        errors = PREP.check(out)
+        if errors:
+            return errors
+        for fact in out["facts"]:
+            if any(i not in sources for i in fact["source_ids"]) or (
+                fact["kind"] != "hypothesis" and not fact["source_ids"]
+            ):
+                errors.append("fact requires supplied sources")
+        for interest in out["interests"]:
+            if (
+                interest["supplier_id"] not in suppliers
+                or not interest["source_ids"]
+                or any(i not in sources for i in interest["source_ids"])
+            ):
+                errors.append("interest requires supplier and sources")
+        if any(i not in claim_ids for i in out["permitted_disclosures"]):
+            errors.append("unapproved disclosure")
+        if any(f not in case["negotiable"] for f in out["lever_priority"]):
+            errors.append("non-negotiable lever")
+        return errors
+
+    raw = model.complete(system, user, budget_s, role="preparation", validate=validate) if model else None
+    out = parse_json(raw)
+    if out is None:
+        return NegotiationBrief(permitted_disclosures=tuple(c.cid for c in claims), lever_priority=default.levers)
+    return NegotiationBrief(
+        tuple(out["facts"]),
+        tuple(out["interests"]),
+        tuple(out["risks"]),
+        tuple(out["lever_priority"]),
+        tuple(out["questions"]),
+        tuple(out["permitted_disclosures"]),
+        out["playbook"],
+    )
