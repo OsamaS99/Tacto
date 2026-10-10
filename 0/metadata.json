@@ -1,0 +1,97 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M4K4EED6QTVJ16P0G88H6R1M",
+  "session_id": "85659574-f9ad-4761-bdf5-07c4c69e9023",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-10T14:46:05.318027Z",
+  "branch": "buyer-agent",
+  "checkpoints_count": 2,
+  "save_step_count": 3,
+  "files_touched": [
+    "starter-kit/arena_kit/cli.py",
+    "starter-kit/arena_kit/evaluate.py",
+    "starter-kit/arena_kit/sim.py"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-5-5",
+  "turn_id": "c34593a0ef42",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 424,
+    "cache_creation_tokens": 610757,
+    "cache_read_tokens": 46549831,
+    "output_tokens": 204063,
+    "api_call_count": 206
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "prompt-skill-claude-code-init-2026-10-10T10:21:44.156966Z",
+      "event_type": "prompt_invocation",
+      "skill": {
+        "name": "init"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "prompt_slash_command",
+        "confidence": "explicit"
+      },
+      "turn_id": "84947dc3e909",
+      "timestamp": "2026-10-10T10:21:44.156966Z",
+      "native": {
+        "command": "/init"
+      },
+      "collapse": {
+        "target": "user_message",
+        "label": "/init",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 41
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-10T14:46:05.222301Z",
+    "agent_lines": 50,
+    "agent_removed": 23,
+    "human_added": 1091,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1141,
+    "total_lines_changed": 1164,
+    "agent_percentage": 6.2714776632302405,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 533,
+      "user_lines_removed": 0,
+      "agent_lines_added": 50,
+      "agent_lines_removed": 23,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/persona.py": 412,
+        "starter-kit/tests/test_persona.py": 121
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 558,
+      "user_lines_removed": 0,
+      "agent_lines_added": 50,
+      "agent_lines_removed": 23,
+      "user_added_per_file": {
+        "starter-kit/arena_kit/persona.py": 422,
+        "starter-kit/tests/test_persona.py": 136
+      }
+    }
+  ]
+}
