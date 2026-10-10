@@ -1,6 +1,6 @@
 # Tacto Negotiation Arena - starter kit
 
-A Python client for the arena API, two example buyer agents that negotiate by e-mail, helpers that
+A Python client for the arena API, three example buyer agents that negotiate by e-mail, helpers that
 read the suppliers' documents and price a term sheet, a runner that plays many cases in parallel,
 `arena-sim` - a local simulator of the arena's API - and a read-only MCP server over the data
 package. Read the brief first
@@ -41,6 +41,7 @@ once the quota is used up (a `429` there does not go away by retrying). Plan you
 ```bash
 uv run arena data                                          # unpacks data/package (and the Sunday release once public)
 uv run arena play case:P01 --agent llm -v
+uv run arena play case:P01 --agent strategic -v           # deterministic decisions; LLM copy is optional
 uv run arena run --set practice --agent llm --parallel 8   # every hosted practice case, 8 at a time
 uv run arena play case:D02 -v                              # the sandbox: 3 demo suppliers, no board
 ```
@@ -184,6 +185,7 @@ print(play(RemoteTable(ArenaClient()), "case:P01", Haggler()))
 | `data.py` | the data package and the Sunday release: `facts.json`, read-only SQL, lookup by ID, documents, cases |
 | `agents/naive.py` | anchors 10 % low, splits the difference, accepts early - the baseline |
 | `agents/llm.py` | the model writes the e-mail and the term sheets from the case and the data it points to; code computes C, reads the documents, removes IDs that do not exist, and refuses bad accepts |
+| `agents/strategic.py` | compares every supplier by total cost, makes small monotonic concessions, rotates verifiable evidence, enforces must-haves and the fallback, and optionally uses an LLM only for e-mail wording |
 | `sim.py` | `arena-sim`: the public API on your machine, with one plain scripted supplier (below) |
 | `mcp_server.py` | the MCP server below |
 
