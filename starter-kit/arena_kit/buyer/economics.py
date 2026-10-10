@@ -9,6 +9,7 @@ from ..cost import RELATIONSHIP_GOALS, closing_terms, supplier_value, total_cost
 from .records import CandidatePackage, EvaluatedPackage, SupplierEstimate
 
 SCENARIO = {"low": 0, "mid": 1, "high": 2}  # index into SupplierEstimate.full_cost; high = dearest C
+LEAD_DAY = 0.003  # share of its price a supplier charges per day of delivery faster than it quoted
 
 
 def estimate_supplier(dossier, sid, price, cash_pressure=False, cap=None):
@@ -33,10 +34,11 @@ def estimate_supplier(dossier, sid, price, cash_pressure=False, cap=None):
 
 
 class EconomicEvaluator:
-    def __init__(self, case, std=None, estimates=None):
+    def __init__(self, case, std=None, estimates=None, quoted=None):
         self.case = case
         self.std = std or {}  # sid -> standard terms from its quote PDFs
         self.estimates = estimates or {}  # sid -> SupplierEstimate
+        self.quoted = quoted or {}  # sid -> {ppm, lead}: the defect rate and delivery it quoted itself
         self.relationship = case["buyer"].get("category_goal") in RELATIONSHIP_GOALS and bool(self.estimates)
 
     def standard(self, sid):
@@ -64,8 +66,17 @@ class EconomicEvaluator:
         return total_cost(self.case, terms) if terms.get("unit_price") else math.inf
 
     def cash_theirs(self, sid, terms):
+        """What a sheet is worth to the supplier per unit. A chargeback costs it at the defect rate it
+        quoted (case P11: standard terms without a ppm made a 500 EUR chargeback look free, and it
+        charged 2.50 EUR a unit for it); a delivery faster than it quoted costs it LEAD_DAY of the
+        price per day (case P10: it charged about 0.16 EUR a unit per day)."""
         est = self.estimates.get(sid)
         supplier = {"standard": self.standard(sid), "interest_rate": est.interest_rate if est else 0.08}
+        q = self.quoted.get(sid) or {}
+        if q.get("ppm") and q["ppm"] > (supplier["standard"].get("ppm_commitment") or 0):
+            supplier["ppm"] = q["ppm"]
+        if q.get("lead") and terms.get("lead_time_days") is not None:
+            supplier["extra"] = -LEAD_DAY * terms["unit_price"] * max(0, q["lead"] - terms["lead_time_days"])
         return supplier_value(self.case, terms, supplier)
 
     def evaluate(self, pkg: CandidatePackage) -> EvaluatedPackage:

@@ -7,6 +7,7 @@ import logging
 import math
 import time
 
+from ..cost import must_haves_ok
 from ..docs import standard_terms
 from ..play import MOVE_LIMIT_S, closing_move, latest, moves_left
 from . import bids
@@ -67,7 +68,7 @@ class BuyerAgent:
                     worth = min(plain.cash_theirs(sid, s) for s in sheets if s.get("unit_price") is not None)
                     cap = worth * (1 - margin / 100)  # its own ask pays it at least the sustainable margin
                     estimates[sid] = estimate_supplier(self.dossier, sid, price, cash, cap)
-        econ = EconomicEvaluator(case, std, estimates)
+        econ = EconomicEvaluator(case, std, estimates, {sid: _quoted(ev, std[sid]) for sid, ev in threads.items()})
         for sid, ev in threads.items():
             last = latest(ev)
             n = sum(m.get("from") != "buyer" for m in ev)
@@ -85,11 +86,13 @@ class BuyerAgent:
                 missing=last.get("missing_fields") or [],
                 rounds_used=sum(m.get("from") == "buyer" for m in ev),
                 moves_left=moves_left(case, ev),
-                their_c=[_c(econ, sid, m["term_sheets"][0].get("terms") or {}) for m in theirs],
+                their_c=[_c_msg(econ, case, sid, m, std[sid]) for m in theirs],
                 my_c=[max(econ.c(sid, s["terms"]) for s in m["term_sheets"]) for m in mine],
                 claim_results=last.get("claim_results") or [],
                 last_body=last.get("body") or "",
                 rev=len(ev),
+                sheets=[s["terms"] for s in sheets if (s.get("terms") or {}).get("unit_price") is not None],
+                my_sheets=[s["terms"] for s in mine[-1]["term_sheets"]] if mine else [],
             )
         cs = CaseState(case, self.playbook, self.dossier, states, c_alt=econ.c_alt())
         cited, cited_to = set(), {}
@@ -213,3 +216,23 @@ class BuyerAgent:
 def _c(econ, sid, terms):
     """C of a supplier's sheet; infinite for one without a price (e.g. an arena note)."""
     return econ.c(sid, terms) if terms.get("unit_price") is not None else math.inf
+
+
+def _quoted(ev, std):
+    """The defect rate and delivery the supplier quoted itself: its first sheet's ppm (or its
+    standard), its latest sheet's lead time (or its standard)."""
+    sheets = [m["term_sheets"][0].get("terms") or {} for m in ev if m.get("from") != "buyer" and m.get("term_sheets")]
+    first, last = (sheets[0], sheets[-1]) if sheets else ({}, {})
+    return {
+        "ppm": first.get("ppm_commitment") or std.get("ppm_commitment"),
+        "lead": last.get("lead_time_days") or std.get("lead_time_days"),
+    }
+
+
+def _c_msg(econ, case, sid, m, std):
+    """C of a supplier message: its best sheet that keeps the must-haves, else its standing sheet -
+    a dearer standing sheet next to a cheaper alternative is no step back (case P11: its
+    alternatives priced our new ask, and we read the standing sheet as a regression)."""
+    sheets = [s.get("terms") or {} for s in m["term_sheets"]]
+    ok = [_c(econ, sid, s) for s in sheets if must_haves_ok(case, s, std)]
+    return min(ok, default=_c(econ, sid, sheets[0]))

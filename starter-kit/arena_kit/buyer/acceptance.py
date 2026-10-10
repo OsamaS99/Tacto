@@ -103,6 +103,28 @@ def mirror(cs, ev, space, t, keep_stated):
     return m
 
 
+def alternative(cs, ev, space, t, threads):
+    """The supplier's own cheaper sheet from its last message, as a package we send back: an
+    alternative cannot be accepted by its id (accept takes the standing sheet), but the supplier
+    answers its own terms with `agreed` (case P11 closed at 49.00 next to its own 46.50 alternative).
+    None unless it keeps the must-haves, beats the alternative and every other thread's reach,
+    saves more than epsilon on the standing sheet, and was not our last offer already."""
+    if t.moves_left <= 1:
+        return None
+    best, c_now = None, c_of(ev, t)
+    for s in t.sheets[1:]:
+        stated = {**{f: v for f, v in t.std.items() if f in space.levers}, **s}
+        terms = space.complete(stated, t.std, partial(ev.c, t.sid))
+        if space.valid(terms, t.std) or terms in t.my_sheets:
+            continue
+        p = ev.evaluate(CandidatePackage(t.sid, terms, "alternative"))
+        if ev.c(t.sid, terms, "none") > cs.c_alt or any(p.c_high > floor_c(ev, o) for o in threads if o.sid != t.sid):
+            continue
+        if p.c < c_now - epsilon(cs) and (best is None or p.c < best.c):
+            best = p
+    return best
+
+
 def keep_alive(cs, ev, threads):
     """RFQ: the threads we still concede to - the best `rfq_keep` by the C they may reach; the rest
     get a holding bid, so none starves and none is bid up for nothing."""
@@ -131,7 +153,10 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         a = assess(t, getattr(t, "label", None))
         c_now = c_of(ev, t)
         takeable = feasible(cs, ev, t) and dominates(ev, t, threads)
+        alt = alternative(cs, ev, space, t, threads)
         if t.status == "final_offer":
+            if alt:  # its own sheet: taking it pushes nothing
+                return DecisionProposal("send", t.sid, (alt,), reason="final offer: its own cheaper alternative")
             m = mirror(cs, ev, space, t, keep_stated=True) if t.moves_left > 0 else None
             if takeable:
                 p = max(pb.p_walk, a.walk_risk if a.intent == "walk_threat" else 0.0)
@@ -156,18 +181,27 @@ def decide(cs, ev, space, order, urgent=False, waiting=()):
         c_target, c_res = cs.targets[sid]
         # never bid a supplier up past a sheet another one already offers us
         c_res = min([c_res, *(c_of(ev, o) for o in threads if o.sid != sid and feasible(cs, ev, o))])
+        c_best = min(c_now, alt.c) if alt else c_now
         ours_at_theirs = ev.c(sid, bids.best_combo(ev, space, sid, their_price))
+        if t.my_c and ours_at_theirs <= t.my_c[-1] + eps:
+            # its price on our terms is no better than our own bid: it refused our terms, so the gap
+            # is to its real sheet (cases P08, P18: a gap of 0 froze us and drew a final offer)
+            ours_at_theirs = c_best
         tau = max(cs.tau, t.rounds_used / max(pb.max_rounds, 1))
         next_c = bids.next_bid(pb, t, a, c_target, c_res, ours_at_theirs, tau, hold=sid not in rivals)
         time_up = late or t.moves_left <= 1 or t.rounds_used >= pb.max_rounds
         ready = late or t.rounds_used >= pb.min_rounds_accept
-        if ready and takeable and (c_now <= next_c + eps or time_up) and not (a.regressed and not time_up):
+        if ready and (takeable or alt) and (c_best <= next_c + eps or time_up) and not (a.regressed and not time_up):
+            if alt:
+                return DecisionProposal("send", t.sid, (alt,), reason="close: its own cheaper alternative")
             m = mirror(cs, ev, space, t, keep_stated=False) if t.moves_left > 0 and not late else None
             if m:
                 return DecisionProposal("send", t.sid, (m,), reason="close: its price on our terms")
             return accept(t, "as good as our next bid" if c_now <= next_c + eps else "time is up")
         demand = partial(space.demand, ref={**ev.standard(sid), **t.standing}, std=t.std)
-        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, their_price)
+        # the dearest price we show never falls between rounds (case P18: 5.54 -> 5.50 drew a final offer)
+        ceiling = max([their_price, *(s["unit_price"] for s in t.my_sheets)])
+        packages = bids.select(bids.generate(ev, space, sid, next_c, their_price, t.standing), demand, ceiling)
         if packages:
             return DecisionProposal("send", t.sid, tuple(packages), reason=f"bid at C {next_c:,.0f}")
     return closing(cs, ev, "nothing left to bid")

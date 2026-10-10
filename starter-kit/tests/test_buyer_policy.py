@@ -169,12 +169,12 @@ def test_reciprocity_no_concession_without_movement_and_monotone_bids():
         last = nxt
 
 
-def test_a_regression_takes_our_last_concession_back_and_is_not_accepted_early():
+def test_a_regression_meets_a_hold_and_is_not_accepted_early():
     ev = evaluator()
     t = thread(ev, prices=(110.0, 105.0, 107.0), mine=(195_000.0, 199_000.0))
     a = assess(t)
     assert a.regressed
-    assert bids.next_bid(playbook(CASE), t, a, 190_000.0, 230_000.0, 240_000.0, tau=0.5) == 195_000.0
+    assert bids.next_bid(playbook(CASE), t, a, 190_000.0, 230_000.0, 240_000.0, tau=0.5) == 199_000.0
     full = {"unit_price": 104.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
     mine = (204_000.0, 205_000.0, 206_500.0)  # its sheet costs 206,613: as good as our next bid
     for prices, kind in (((110.0, 105.0, 104.0), "accept"), ((110.0, 103.0, 104.0), "send")):
@@ -474,3 +474,18 @@ def test_a_strategic_suppliers_full_cost_is_capped_by_its_own_ask():
     assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.9 * 105.0)
     _, ev = agent.observe(with_buyer(case, sustainable_margin_pct=5), opened(110.0))
     assert ev.estimates["sup:A"].full_cost[1] == pytest.approx(0.92 * 110.0)  # below the cap: as estimated
+
+
+def test_its_own_cheaper_alternative_is_sent_back_not_its_dearer_final_offer_accepted():
+    """Case P11: a final offer at 49.00 came next to the supplier's own 46.50 alternative - accept
+    takes only the standing sheet, so we send the alternative back (it answers 'agreed')."""
+    ev = evaluator()
+    full = {"unit_price": 109.0, "payment_days": 90, "contract_months": 24, "incoterm": "DAP"}
+    alt = {**full, "unit_price": 104.0}
+    t = thread(ev, prices=(110.0, 109.0), mine=(195_000.0, 199_000.0), status="final_offer", standing=full)
+    t.sheets = [full, alt]
+    cs, space = state(CASE, [t], ev)
+    p = decide(cs, ev, space, ["sup:A"])
+    assert p.kind == "send" and p.packages[0].terms == alt
+    t.my_sheets = [alt]  # we sent it already and it answered with its final offer again: take that
+    assert decide(cs, ev, space, ["sup:A"]).kind == "accept"

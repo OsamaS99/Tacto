@@ -75,6 +75,8 @@ class SupplierThreadState:
     last_body: str = ""
     rev: int = 0  # messages in the thread: the canonical state revision
     label: dict | None = None  # Decision Selector labels for its last message (tune walk risk, never price)
+    sheets: list[dict] = field(default_factory=list)  # every priced sheet of its last message, standing first
+    my_sheets: list[dict] = field(default_factory=list)  # the sheets of our last message
 
 
 @dataclass(slots=True)

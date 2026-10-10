@@ -1,7 +1,7 @@
 """BidGenerator: how much to concede this turn (in our C, on our own package) and the complete
 term sheets that cost exactly that. Concessions follow the supplier's moves (reciprocity) and
-the clock (an aspiration curve), never pass half the remaining gap, never go backwards - except
-that a supplier who moves back gets our last concession back."""
+the clock (an aspiration curve), never pass half the remaining gap and never go backwards - a
+supplier who moves back meets a hold."""
 
 import statistics
 
@@ -63,10 +63,8 @@ def next_bid(pb, t, a, c_target, c_res, c_their_on_ours, tau, hold=False):
     if not t.my_c:
         return c_target
     last = t.my_c[-1]
-    if a.regressed:  # it moved back: our last concession goes back too
-        return max(c_target, min(last, t.my_c[-2] if len(t.my_c) > 1 else last))
-    if hold:
-        return last
+    if a.regressed or hold:  # it moved back: we hold - taking a concession back reads as going
+        return last  # backwards and hardens it (case P11: 'you actually went backwards on the price')
     step = pb.k * max(0.0, a.concession)  # reciprocity: their move, in our C
     bid = max(aspiration(c_target, c_res, tau, pb.beta), last + step)
     bid = min(bid, last + 0.5 * max(0.0, c_their_on_ours - last), c_res)
