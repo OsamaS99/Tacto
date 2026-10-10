@@ -20,6 +20,18 @@ FINAL = re.compile(
     re.I,
 )
 CASH = re.compile(r"\b(cash flow|liquidity|prepayment|faster payment|shorter payment|liquidität|vorkasse)\b", re.I)
+# Require explicit withholding of cost information, not unrelated internal approvals.
+COST_REFUSAL = re.compile(
+    r"\b(?:cost(?:s|ing| breakdown)?|breakdown|figures?|kalkulation|kosten(?:aufstellung)?)\b"
+    r"[^.!?\n]{0,60}\b(?:are|is|remain|remains|stay|stays|bleiben|bleibt|sind|ist)\s+"
+    r"(?:(?:strictly|purely|rein|streng)\s+)?(?:internal|confidential|intern|vertraulich)\b"
+    r"|\b(?:do not|don't|cannot|can't|will not|won't)\s+(?:disclose|share|provide|release)\b"
+    r"[^.!?\n]{0,60}\b(?:costs?|costing|breakdown|figures?)\b"
+    r"|\bkeine\s+(?:internen\s+)?(?:kosten|kalkulation|kostenaufstellung)\b"
+    r"[^.!?\n]{0,30}\b(?:offenlegen|teilen|herausgeben)\b",
+    re.I,
+)
+
 FIELD_WORDS = {
     "payment_days": r"payment|prepayment|zahlung|vorkasse",
     "contract_months": r"contract|commitment|vertrag",
@@ -61,11 +73,7 @@ def interpret(sid, message, *, model=None, decisions=None, budget_s=0, deadline=
             re.I,
         )
     )
-    refused = (
-        ("breakdown",)
-        if re.search(r"do not disclose|confidential|figures stay|keine.*kosten|\bintern(?:al)?\b", body, re.I)
-        else ()
-    )
+    refused = ("breakdown",) if COST_REFUSAL.search(body) else ()
     answered = (
         ("breakdown",) if re.search(r"attached.*breakdown|breakdown.*attached|cost breakdown.*sent", body, re.I) else ()
     )

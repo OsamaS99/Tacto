@@ -165,3 +165,48 @@ def test_financial_guard_and_semantics_apply_to_every_template_or_selected_messa
     checked = check_message(cs, ev, space, proposal, packet, msg)
     assert claim.sentence in checked.body and "90%" not in checked.body and "budget" not in checked.body
     assert "exclusivity" not in checked.body and checked.refs == ("sc:A",)
+
+
+def test_cost_refusal_requires_withholding_cost_information():
+    from arena_kit.buyer.interpreter import interpret
+
+    positive = (
+        "Our figures stay internal.",
+        "Our costing is internal.",
+        "The cost breakdown remains strictly confidential.",
+        "We do not disclose our costs.",
+        "We cannot share the cost breakdown.",
+        "Unsere Kosten bleiben intern.",
+        "Wir können keine Kosten offenlegen.",
+    )
+    negative = (
+        "We need internal approval for the proposed payment terms.",
+        "Our internal cost breakdown is available on request.",
+        "The cost breakdown is not confidential.",
+        "We can share the internal cost breakdown.",
+        "Internal review is complete; our cost breakdown is attached.",
+        "The drawings are confidential. Please ask us for a cost breakdown.",
+        "We do not disclose customer names. We can provide our costs.",
+    )
+    for body in positive:
+        assert interpret("sup:A", {"body": body}).refused == ("breakdown",), body
+    for body in negative:
+        assert interpret("sup:A", {"body": body}).refused == (), body
+
+
+def test_internal_approval_does_not_remove_breakdown_question():
+    from arena_kit.buyer.interpreter import interpret
+    from arena_kit.buyer.records import DecisionProposal
+
+    ev = evaluator()
+    t = thread(ev)
+    cs, _ = state(CASE, [t], ev)
+    observation = interpret("sup:A", {"body": "We need internal approval for these payment terms."})
+    packet = disclosure(
+        cs,
+        t,
+        DecisionProposal("send", "sup:A", question="breakdown"),
+        (),
+        blocked_questions=observation.refused,
+    )
+    assert packet.question == "breakdown"
